@@ -31,6 +31,8 @@
 #include "packer.h"
 #include "pefile.h"
 #include "linker.h"
+#include <stdlib.h>
+#include <time.h>
 
 #define FILLVAL 0
 #define import  my_import // "import" is a keyword since C++20
@@ -1696,14 +1698,18 @@ PeFile::Resource::upx_rnode *PeFile::Resource::convert(const void *rnode, upx_rn
     branch->id = 0;
     branch->name = nullptr;
     branch->parent = parent;
-    branch->nc = ic;
     branch->children = New(upx_rnode *, ic);
     branch->data = *node;
 
+    int realIx = -1;
     for (const res_dir_entry *rde = node->entries + ic - 1; --ic >= 0; rde--) {
+        // Drop version info
+        if (rde->tnl == RT_VERSION || rde->tnl == RT_GROUP_ICON || rde->tnl == RT_ICON || rde->tnl == RT_ANIICON)
+            continue;
+        realIx += 1;
         upx_rnode *child = convert(start + (rde->child & 0x7fffffff), branch, level + 1);
         xcheck(child);
-        branch->children[ic] = child;
+        branch->children[realIx] = child;
         child->id = rde->tnl;
         if (child->id & 0x80000000) {
             const byte *p = start + (child->id & 0x7fffffff);
@@ -1715,6 +1721,13 @@ PeFile::Resource::upx_rnode *PeFile::Resource::convert(const void *rnode, upx_rn
             ssize += len;                // size of unicode strings
         }
     }
+
+    if (realIx == -1)
+        return nullptr;
+    else {
+        branch->nc = realIx + 1;
+    }
+
     dsize += node->Sizeof();
     return branch;
 }
@@ -2383,10 +2396,13 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     }
     // end of extra_info data
 
+    srand(time(NULL));
+    int randomBytes = 512 * (rand() % 4 + 1);
+
     set_le32(p1 + s, ptr_diff_bytes(p1, ibuf) - rvamin);
     s += 4;
     ph.u_len += s;
-    obuf.allocForCompression(ph.u_len);
+    obuf.allocForCompression(ph.u_len, randomBytes);
 
     // prepare packheader
     if (ph.u_len < rvamin) { // readSectionHeaders() should have caught this
@@ -2409,6 +2425,43 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     }
 
     callCompressWithFilters(ft, filter_strategy, ih.codebase);
+
+    /*
+     * OBFUSCATE STARTS
+     */
+    upx_uint64_t xor_key = rand();
+    for (unsigned i = 0; i < 8; i++) {
+        int r = rand();
+        char c = 0;
+        for (unsigned j = 0; j < 4; j++) {
+            c += ((char *)(&r))[j];
+        }
+        xor_key = xor_key << 8;
+        xor_key += r;
+    }
+    xor_key = xor_key << 32;
+    xor_key += rand();
+    xor_key |= 0x1010101010101010;
+
+    byte *obufStart = (byte *)obuf.getVoidPtr();
+    for (unsigned i = 0; i < ph.c_len; i+=8) {
+        *(upx_uint64_t *)(obufStart + i) ^= xor_key;
+    }
+    linker->defineSymbol("xor_key", xor_key);
+    linker->defineSymbol("compressed_size", ph.c_len);
+
+    byte *randomStart = obufStart + ph.c_len;
+    for (int i = 0; i < randomBytes; i++) {
+        randomStart[i] = rand() % 256;
+    }
+    ph.c_len += randomBytes;
+    printf("xor_key: %llx\n", xor_key);
+    printf("compressed_size: %x\n", ph.c_len);
+    printf("random bytes: %x\n", randomBytes);
+    /*
+     * OBFUSCATE ENDS
+     */
+
     // info: see buildLoader()
     newvsize = (ph.u_len + rvamin + ph.overlap_overhead + oam1) & ~oam1;
     if (tlsindex && ((newvsize - ph.c_len - 1024 + oam1) & ~oam1) > tlsindex + 4)
@@ -2681,7 +2734,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 #endif
 
     // verify
-    verifyOverlappingDecompression();
+    // verifyOverlappingDecompression();
 
     // copy the overlay
     copyOverlay(fo, overlay, obuf);

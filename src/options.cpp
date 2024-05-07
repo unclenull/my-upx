@@ -75,7 +75,8 @@ void Options::reset() noexcept {
     o->o_unix.osabi0 = 3; // 3 == ELFOSABI_LINUX
 
     o->win32_pe.compress_exports = 1;
-    o->win32_pe.compress_icons = 2;
+    // Always compress icons
+    o->win32_pe.compress_icons = 3;
     o->win32_pe.compress_resources = -1;
     for (size_t i = 0; i < TABLESIZE(o->win32_pe.compress_rt); i++)
         o->win32_pe.compress_rt[i] = -1;
