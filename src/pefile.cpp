@@ -967,7 +967,7 @@ unsigned PeFile::processImports0(ord_mask_t ord_mask) // pass 1
 
     struct UDll final {
         const byte *name;
-        const byte *shname;
+        int nameOffset;
         unsigned ordinal;
         unsigned iat;
         const LEXX *lookupt;
@@ -988,15 +988,6 @@ unsigned PeFile::processImports0(ord_mask_t ord_mask) // pass 1
                 return rc;
             if ((a->ordinal != 0) != (b->ordinal != 0))
                 return (a->ordinal != 0) ? -1 : 1;
-            if (a->shname && b->shname) {
-                rc = (int) (upx_safe_strlen(a->shname) - upx_safe_strlen(b->shname));
-                if (rc != 0)
-                    return rc;
-                rc = strcmp(a->shname, b->shname);
-                if (rc != 0)
-                    return rc;
-            } else if ((a->shname != nullptr) != (b->shname != nullptr))
-                return (a->shname != nullptr) ? -1 : 1;
             // What could remain?
             // make sort order deterministic
             return a->original_position < b->original_position ? -1 : 1;
@@ -1013,7 +1004,7 @@ unsigned PeFile::processImports0(ord_mask_t ord_mask) // pass 1
         const import_desc *const im = im_start + ic;
         idlls[ic] = dlls + ic;
         dlls[ic].name = ibuf.subref("bad dllname %#x", im->dllname, 1);
-        dlls[ic].shname = nullptr;
+        dlls[ic].nameOffset = 0;
         dlls[ic].ordinal = 0;
         dlls[ic].iat = im->iat;
         const unsigned skip2 = (im->oft ? im->oft : im->iat);
@@ -1033,8 +1024,6 @@ unsigned PeFile::processImports0(ord_mask_t ord_mask) // pass 1
                 IPTR_VAR(const byte, const name, ibuf + (*tarr + 2));
                 unsigned len = strlen(name);
                 soimport += len + 1;
-                if (dlls[ic].shname == nullptr || len < strlen(dlls[ic].shname))
-                    dlls[ic].shname = ibuf + (*tarr + 2);
             }
             soimport++; // separator
         }
@@ -1047,50 +1036,54 @@ unsigned PeFile::processImports0(ord_mask_t ord_mask) // pass 1
 
     info("Processing imports: %d DLLs", dllnum);
     for (unsigned ic = 0; ic < dllnum; ic++) {
-        info("  DLL %3d %s %s", ic, idlls[ic]->name, idlls[ic]->shname);
+        info("  DLL %3d %s", ic, idlls[ic]->name);
     }
 
     ilinker = new ImportLinker(sizeof(LEXX));
     // create the new import table
     addStubImports();
 
+    SPAN_S_VAR(byte, ppi, oimport); // preprocessed imports
+
+    int importOffset = 2;
+    ppi += 2;
     for (unsigned ic = 0; ic < dllnum; ic++) {
+        idlls[ic]->nameOffset = importOffset;
+        const unsigned size = 1 + strlen(idlls[ic]->name);
+        memcpy(ppi, idlls[ic]->name, size);
+        ppi += size;
+        importOffset += size;
+
         if (idlls[ic]->isk32) {
             // for kernel32.dll we need to put all the imported
             // ordinals into the output import table, as on
             // some versions of windows GetProcAddress does not resolve them
-            if (strcasecmp(idlls[ic]->name, "kernel32.dll"))
-                continue;
-            if (idlls[ic]->ordinal)
-                for (const LEXX *tarr = idlls[ic]->lookupt; *tarr; tarr++)
-                    if (*tarr & ord_mask) {
-                        ilinker->add_import(kernelDll(), *tarr & 0xffff);
-                        kernel32ordinal = true;
-                    }
-        } else if (!ilinker->hasDll(idlls[ic]->name)) {
-            if (idlls[ic]->shname && !idlls[ic]->ordinal)
-                ilinker->add_import(idlls[ic]->name, idlls[ic]->shname);
-            else
-                ilinker->add_import(idlls[ic]->name, idlls[ic]->ordinal);
+            if (strcasecmp(idlls[ic]->name, "kernel32.dll") == 0
+                    && idlls[ic]->ordinal
+                    && *idlls[ic]->lookupt & ord_mask
+               ) {
+                kernel32ordinal = true;
+            }
         }
     }
+    set_le16(oimport, importOffset);
 
     soimpdlls = ilinker->build();
 
     Interval names(ibuf), iats(ibuf), lookups(ibuf);
 
     // create the preprocessed data
-    SPAN_S_VAR(byte, ppi, oimport); // preprocessed imports
     for (unsigned ic = 0; ic < dllnum; ic++) {
         const LEXX *tarr = idlls[ic]->lookupt;
-        set_le32(ppi, ilinker->getAddress(idlls[ic]->name));
-        set_le32(ppi + 4, idlls[ic]->iat - rvamin);
+        set_le32(ppi, idlls[ic]->nameOffset);
+        set_le32(ppi + 4, idlls[ic]->iat - rvamin); // rvamin is added back at runtime
         ppi += 8;
         for (; *tarr; tarr++)
             if (*tarr & ord_mask) {
                 const unsigned ord = *tarr & 0xffff;
                 if (idlls[ic]->isk32 && kernel32ordinal) {
                     *ppi++ = 0xfe; // signed + odd parity
+                    // Use the already resolved by system
                     set_le32(ppi, ilinker->getAddress(idlls[ic]->name, ord));
                     ppi += 4;
                 } else {
@@ -1928,9 +1921,11 @@ void PeFile::processResources(Resource *res) {
     }
 
     res->init(ibuf.subref("bad res %#x", vaddr, 1));
-
     for (soresources = res->dirsize(); res->next(); soresources += 4 + res->size())
         ;
+    if (soresources == 0)
+        return;
+
     mb_oresources.alloc(soresources);
     mb_oresources.clear();
     oresources = mb_oresources; // => SPAN_S
@@ -2306,8 +2301,18 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         set_le32(stub + sizeof(stub) - sizeof(LE32), sizeof(stub));
         fo->write(stub, sizeof(stub));
         pe_offset = sizeof(stub);
-    } else
-        handleStub(fi, fo, pe_offset);
+    } else {
+        if (pe_offset > 0x80) {
+            // Remove Rich signature
+            int e_lfanew = 0x80;
+            handleStub(fi, fo, e_lfanew);
+            fo->seek(0x3c, SEEK_SET);
+            fo->rewrite(&e_lfanew, 4);
+            fo->seek(e_lfanew, SEEK_SET);
+        } else {
+            handleStub(fi, fo, pe_offset);
+        }
+    }
     unsigned overlaystart = readSections(objs, ih.imagesize, ih.filealign, ih.datasize);
     unsigned overlay = file_size_u - stripDebug(overlaystart);
     if (overlay >= file_size_u)
@@ -2397,12 +2402,12 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     // end of extra_info data
 
     srand(time(NULL));
-    int randomBytes = 512 * (rand() % 4 + 1);
+    int garbageBytes = 512 * (rand() % 4 + 1);
 
     set_le32(p1 + s, ptr_diff_bytes(p1, ibuf) - rvamin);
     s += 4;
     ph.u_len += s;
-    obuf.allocForCompression(ph.u_len, randomBytes);
+    obuf.allocForCompression(ph.u_len, garbageBytes);
 
     // prepare packheader
     if (ph.u_len < rvamin) { // readSectionHeaders() should have caught this
@@ -2451,13 +2456,13 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     linker->defineSymbol("compressed_size", ph.c_len);
 
     byte *randomStart = obufStart + ph.c_len;
-    for (int i = 0; i < randomBytes; i++) {
+    for (int i = 0; i < garbageBytes; i++) {
         randomStart[i] = rand() % 256;
     }
-    ph.c_len += randomBytes;
-    printf("xor_key: %llx\n", xor_key);
-    printf("compressed_size: %x\n", ph.c_len);
-    printf("random bytes: %x\n", randomBytes);
+    ph.c_len += garbageBytes;
+    printf("xor_key: 0x%llx\n", xor_key);
+    printf("compressed_size: 0x%x\n", ph.c_len);
+    printf("garbage bytes: 0x%x\n", garbageBytes);
     /*
      * OBFUSCATE ENDS
      */
@@ -3171,6 +3176,10 @@ void PeFile32::readPeHeader() {
     if (31 < (unsigned) ih.subsystem) {
         throwCantPack("bad ih.subsystem 0x%x", (unsigned) ih.subsystem);
     }
+    // fixed timestamp
+    // *(int *)&ih.__ = 0xdd9cb90b;
+    // fixed linker version
+    // *(short *)&ih.___ = 5;
     isefi = ((1u << ih.subsystem) &
              ((1u << IMAGE_SUBSYSTEM_EFI_APPLICATION) |
               (1u << IMAGE_SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER) |
@@ -3227,6 +3236,8 @@ void PeFile64::readPeHeader() {
     if (31 < (unsigned) ih.subsystem) {
         throwCantPack("bad ih.subsystem 0x%x", (unsigned) ih.subsystem);
     }
+    // fixed timestamp
+    *(int *)&ih.__ = 0xdd9cb90b;
     isefi = ((1u << ih.subsystem) &
              ((1u << IMAGE_SUBSYSTEM_EFI_APPLICATION) |
               (1u << IMAGE_SUBSYSTEM_EFI_BOOT_SERVICE_DRIVER) |

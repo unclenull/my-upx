@@ -740,7 +740,7 @@ static const char *getIdentstr(unsigned *size, int small) {
         "$Id: UPX "
         "(C) 1996-" UPX_VERSION_YEAR " the UPX Team. All Rights Reserved. http://upx.sf.net $"
         "\n";
-    static char identtiny[] = UPX_VERSION_STRING4;
+    static char identtiny[] = "1.00";
 
     static upx_std_once_flag init_done;
     upx_std_call_once(init_done, []() noexcept {

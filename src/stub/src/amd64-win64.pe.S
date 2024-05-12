@@ -90,6 +90,26 @@ section         PEMAIN01
                 lea     rsi, [rip + start_of_compressed]
                 lea     rdi, [rsi + start_of_uncompressed]
 
+#
+# DEOBFUSCATE START
+#
+                mov     rdx, IMM64(xor_key)
+                xor     rcx, rcx
+                xor_start:
+                mov     rax, [rsi + rcx]
+                xor     rax, rdx
+                mov     [rsi + rcx], rax
+                add     rcx, 8
+                # cmp doesn't accept `dword ptr 1`, use a 4 byte number to ensure encoded as 4 bytes
+                cmp     rcx, 0x10000000
+                # added to it
+                .reloc . - 4, R_X86_64_32, (-0x10000000 + compressed_size)
+                jb      xor_start
+#
+# DEOBFUSCATE END
+#
+
+
 section         PEICONS1
                 incw    [rdi + icon_offset]
 section         PEICONS2
@@ -250,14 +270,19 @@ section         PEFILTER49
 // =============
 
 section PEIMPORT
-                sub     rsp, 0x28
                 lea     rdi, [rsi + compressed_imports]
+                push    r15
+                mov     r15, rdi
+                xor     rax, rax
+                mov     ax, [rdi]
+                add     rdi, rax
+                sub     rsp, 0x20
 next_dll:
                 mov     eax, [rdi]
                 or      eax, eax
                 jz      SHORT(imports_done)
                 mov     ebx, [rdi + 4]    // iat
-                lea     rcx, [rax + rsi + start_of_imports]
+                lea     rcx, [rax + r15]
                 add     rbx, rsi
                 add     rdi, 8
 
@@ -306,7 +331,8 @@ next_imp:
                 jmp     SHORT(next_func)
 imp_failed:
 section         PEIERDLL
-                add     rsp, 0x28
+                add     rsp, 0x20
+                pop     r15
                 pop     rbp
                 pop     rdi
                 pop     rsi
@@ -315,11 +341,14 @@ section         PEIERDLL
                 ret
 
 section         PEIEREXE
+                add     rsp, 0x20
+                pop     r15
                 //      rcx contains garbage -> garbage return code
                 jmp     [rip + ExitProcess]
 section         PEIMDONE
 imports_done:
-                add     rsp, 0x28
+                add     rsp, 0x20
+                pop     r15
 
 // =============
 // ============= RELOCATION

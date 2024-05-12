@@ -198,7 +198,6 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
         linker->defineSymbol("GetProcAddress", ilinkerGetAddress("kernel32.dll", "GetProcAddress"));
         linker->defineSymbol("kernel32_ordinals", myimport);
         linker->defineSymbol("LoadLibraryA", ilinkerGetAddress("kernel32.dll", "LoadLibraryA"));
-        linker->defineSymbol("start_of_imports", myimport);
         linker->defineSymbol("compressed_imports", cimports);
     }
 

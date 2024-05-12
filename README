@@ -12,3 +12,12 @@
       tar -xoaf bin-upx-20221212.tar.xz /C ~/.local/bin/
       rm bin-upx-20221212.tar.xz
     ```
+
+## improvements
+- xor
+- size randomized
+- import dll names compressed
+- stripped resouce icon, version
+- stripped timestamp, rich, other versions
+
+- false upx header

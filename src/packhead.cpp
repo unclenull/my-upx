@@ -110,30 +110,34 @@ void PackHeader::putPackHeader(SPAN_S(byte) p) const {
     int size = 0;
     upx_uint8_t old_chksum = 0;
 
+    unsigned random = rand() % 5000;
+    unsigned _u_len = c_len + random;
+    unsigned _u_file_size = u_file_size + random;
+    unsigned _filter = 0;
     // the new variable length header
     if (format < 128) { // little endian
         if (format == UPX_F_DOS_COM || format == UPX_F_DOS_SYS) {
             size = 22;
             old_chksum = get_packheader_checksum(p, size - 1);
-            set_le16(p + 16, u_len);
+            set_le16(p + 16, _u_len);
             set_le16(p + 18, c_len);
-            p[20] = (byte) filter;
+            p[20] = (byte) _filter;
         } else if (format == UPX_F_DOS_EXE) {
             size = 27;
             old_chksum = get_packheader_checksum(p, size - 1);
-            set_le24(p + 16, u_len);
+            set_le24(p + 16, _u_len);
             set_le24(p + 19, c_len);
-            set_le24(p + 22, u_file_size);
-            p[25] = (byte) filter;
+            set_le24(p + 22, _u_file_size);
+            p[25] = (byte) _filter;
         } else if (format == UPX_F_DOS_EXEH) {
             throwInternalError("invalid format");
         } else {
             size = 32;
             old_chksum = get_packheader_checksum(p, size - 1);
-            set_le32(p + 16, u_len);
+            set_le32(p + 16, _u_len);
             set_le32(p + 20, c_len);
-            set_le32(p + 24, u_file_size);
-            p[28] = (byte) filter;
+            set_le32(p + 24, _u_file_size);
+            p[28] = (byte) _filter;
             p[29] = (byte) filter_cto;
             assert(n_mru == 0 || (n_mru >= 2 && n_mru <= 256));
             p[30] = (byte) (n_mru ? n_mru - 1 : 0);
@@ -143,12 +147,12 @@ void PackHeader::putPackHeader(SPAN_S(byte) p) const {
     } else { // big endian
         size = 32;
         old_chksum = get_packheader_checksum(p, size - 1);
-        set_be32(p + 8, u_len);
+        set_be32(p + 8, _u_len);
         set_be32(p + 12, c_len);
         set_be32(p + 16, u_adler);
         set_be32(p + 20, c_adler);
-        set_be32(p + 24, u_file_size);
-        p[28] = (byte) filter;
+        set_be32(p + 24, _u_file_size);
+        p[28] = (byte) _filter;
         p[29] = (byte) filter_cto;
         assert(n_mru == 0 || (n_mru >= 2 && n_mru <= 256));
         p[30] = (byte) (n_mru ? n_mru - 1 : 0);
@@ -156,7 +160,7 @@ void PackHeader::putPackHeader(SPAN_S(byte) p) const {
 
     p[4] = (byte) version;
     p[5] = (byte) format;
-    p[6] = (byte) method;
+    p[6] = (byte) method + 1;
     p[7] = (byte) level;
 
     // header_checksum

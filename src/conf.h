@@ -350,6 +350,9 @@ inline void NO_fprintf(FILE *, const char *, ...) noexcept attribute_format(2, 3
 inline void NO_printf(const char *, ...) noexcept {}
 inline void NO_fprintf(FILE *, const char *, ...) noexcept {}
 
+#define NO_printf info
+#define NO_fprintf(f, fmt, ...) info(fmt, ##__VA_ARGS__)
+
 #if __has_builtin(__builtin_memcpy_inline)
 #define upx_memcpy_inline __builtin_memcpy_inline
 #elif __has_builtin(__builtin_memcpy)

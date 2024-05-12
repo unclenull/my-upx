@@ -202,7 +202,6 @@ void PackW32PeI386::defineSymbols(unsigned ncsection, unsigned upxsection, unsig
         linker->defineSymbol("kernel32_ordinals", myimport);
         linker->defineSymbol("LoadLibraryA",
                              0u - rvamin + ilinkerGetAddress("kernel32.dll", "LoadLibraryA"));
-        linker->defineSymbol("start_of_imports", myimport);
         linker->defineSymbol("compressed_imports", cimports);
     }
 
