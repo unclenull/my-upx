@@ -2475,12 +2475,14 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     const int oh_filealign = UPX_MIN(ih.filealign, 0x200);
     const unsigned fam1 = oh_filealign - 1;
 
-    int identsize = 0;
-    const unsigned codesize = getLoaderSection("IDENTSTR", &identsize);
-    assert(identsize > 0);
-    unsigned ic;
-    getLoaderSection("UPX1HEAD", (int *) &ic);
-    identsize += ic;
+    // int identsize = 0;
+    // const unsigned codesize = getLoaderSection("IDENTSTR", &identsize);
+    // assert(identsize > 0);
+    // unsigned ic;
+    // getLoaderSection("UPX1HEAD", (int *) &ic);
+    // identsize += ic;
+    int codesize;
+    linker->getLoader(&codesize);
 
     const bool has_oxrelocs =
         !opt->win32_pe.strip_relocs && (use_stub_relocs || sotls || loadconfiv.ivnum);
@@ -2501,6 +2503,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
     // identsplit - number of ident + (upx header) bytes to put into the PE header
     const unsigned sizeof_osection = sizeof(osection[0]) * oobjs;
+    /*
     int identsplit = pe_offset + sizeof_osection + sizeof(ht);
     if ((identsplit & fam1) == 0)
         identsplit = 0;
@@ -2513,14 +2516,16 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     const unsigned c_len =
         ((ph.c_len + ic) & 15) == 0 ? ph.c_len : ph.c_len + 16 - ((ph.c_len + ic) & 15);
     obuf.clear(ph.c_len, c_len - ph.c_len);
+    */
 
+    unsigned c_len = ph.c_len;
     const unsigned aligned_sotls = ALIGN_UP(sotls, (unsigned) sizeof(LEXX));
     const unsigned s1size =
-        ALIGN_UP(ic + c_len + codesize, (unsigned) sizeof(LEXX)) + aligned_sotls + soloadconf;
-    const unsigned s1addr = (newvsize - (ic + c_len) + oam1) & ~oam1;
+        ALIGN_UP(c_len + codesize, (unsigned) sizeof(LEXX)) + aligned_sotls + soloadconf;
+    const unsigned s1addr = (newvsize - c_len + oam1) & ~oam1;
 
     const unsigned ncsection = (s1addr + s1size + oam1) & ~oam1;
-    const unsigned upxsection = s1addr + ic + c_len;
+    const unsigned upxsection = s1addr + c_len;
 
     Reloc rel(1024); // new stub relocations are put here
     addNewRelocations(rel, upxsection);
@@ -2542,7 +2547,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     ODSIZE(PEDIR_BOUND_IMPORT) = 0;
 
     // tls & loadconf are put into section 1
-    ic = s1addr + s1size - aligned_sotls - soloadconf;
+    unsigned ic = s1addr + s1size - aligned_sotls - soloadconf;
 
     if (use_tls_callbacks)
         tls_handler_offset = linker->getSymbolOffset("PETLSC2") + upxsection;
@@ -2587,13 +2592,13 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     if (last_section_rsrc_only)
         callProcessResources(res, ic = res_start);
 
-    defineSymbols(ncsection, upxsection, sizeof(oh), identsize - identsplit, s1addr);
+    defineSymbols(ncsection, upxsection, sizeof(oh), 0, s1addr);
     defineFilterSymbols(&ft);
     relocateLoader();
     const unsigned lsize = getLoaderSize();
     MemBuffer loader(lsize);
     memcpy(loader, getLoader(), lsize);
-    patchPackHeader(loader, lsize);
+    // patchPackHeader(loader, lsize);
 
     const unsigned ncsize =
         soxrelocs + soimpdlls + soexport + (!last_section_rsrc_only ? soresources : 0);
@@ -2606,8 +2611,8 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     const unsigned ncsize_virt_increase = soxrelocs && (ncsize & oam1) == 0 ? 8 : 0;
 
     // fill the sections
-    strcpy(osection[0].name, "UPX0");
-    strcpy(osection[1].name, "UPX1");
+    strcpy(osection[0].name, ".bss");
+    strcpy(osection[1].name, ".text");
     // after some windoze debugging I found that the name of the sections
     // DOES matter :( .rsrc is used by oleaut32.dll (TYPELIBS)
     // and because of this lame dll, the resource stuff must be the
@@ -2615,7 +2620,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     // too idiot to use the data directories... M$ suxx 4 ever!
     // ... even worse: exploder.exe in NiceTry also depends on this to
     // locate version info
-    strcpy(osection[2].name, !last_section_rsrc_only && soresources ? ".rsrc" : "UPX2");
+    strcpy(osection[2].name, !last_section_rsrc_only && soresources ? ".rsrc" : ".rdata");
 
     osection[0].vaddr = rvamin;
     osection[1].vaddr = s1addr;
@@ -2685,13 +2690,14 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     fo->write(&oh, sizeof(oh));
     fo->write(osection, sizeof(osection[0]) * oobjs);
     // some alignment
-    if (identsplit == identsize) {
-        unsigned n = osection[!last_section_rsrc_only ? 0 : 1].rawdataptr - fo->getBytesWritten() -
-                     identsize;
-        assert(n <= oh.filealign);
-        fo->write(ibuf, n);
-    }
-    fo->write(loader + codesize, identsize);
+    // if (identsplit == identsize) {
+    //     unsigned n = osection[!last_section_rsrc_only ? 0 : 1].rawdataptr - fo->getBytesWritten() -
+    //                  identsize;
+    //     assert(n <= oh.filealign);
+    //     fo->write(ibuf, n);
+    // }
+    // fo->write(loader + codesize, identsize);
+    fo->seek(osection[!last_section_rsrc_only ? 0 : 1].rawdataptr, SEEK_SET);
     infoWriting("loader", fo->getBytesWritten());
     fo->write(obuf, c_len);
     infoWriting("compressed data", c_len);

@@ -141,7 +141,7 @@ void PackW64PeAmd64::buildLoader(const Filter *ft) {
     if (use_tls_callbacks)
         addLoader("PETLSC2");
 
-    addLoader("IDENTSTR,UPX1HEAD");
+    // addLoader("IDENTSTR,UPX2HEAD");
 }
 
 bool PackW64PeAmd64::needForceOption() const {
