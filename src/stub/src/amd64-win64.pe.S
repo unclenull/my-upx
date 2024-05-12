@@ -83,12 +83,13 @@ section         PEISDLL1
                 jnz     reloc_end_jmp
 section         PEMAIN01
                 //; remember to keep stack aligned!
-                push    rbx
-                push    rsi
-                push    rdi
-                push    rbp
                 lea     rsi, [rip + start_of_compressed]
                 lea     rdi, [rsi + start_of_uncompressed]
+                push    rbp
+                push    rdi
+                push    rsi
+                push    rbx
+                push    r15
 
 #
 # DEOBFUSCATE START
@@ -271,7 +272,6 @@ section         PEFILTER49
 
 section PEIMPORT
                 lea     rdi, [rsi + compressed_imports]
-                push    r15
                 mov     r15, rdi
                 xor     rax, rax
                 mov     ax, [rdi]
@@ -333,22 +333,20 @@ imp_failed:
 section         PEIERDLL
                 add     rsp, 0x20
                 pop     r15
-                pop     rbp
-                pop     rdi
-                pop     rsi
                 pop     rbx
+                pop     rsi
+                pop     rdi
+                pop     rbp
                 xor     eax, eax
                 ret
 
 section         PEIEREXE
-                add     rsp, 0x20
-                pop     r15
+                add     rsp, 0x28
                 //      rcx contains garbage -> garbage return code
                 jmp     [rip + ExitProcess]
 section         PEIMDONE
 imports_done:
-                add     rsp, 0x20
-                pop     r15
+                add     rsp, 0x28
 
 // =============
 // ============= RELOCATION
