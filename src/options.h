@@ -55,8 +55,9 @@ enum {
 
 struct Options final {
     void reset() noexcept;
-
     int cmd; // CMD_xxx
+
+    bool pass_xor_key;
 
     // compression options
     int method; // M_xxx

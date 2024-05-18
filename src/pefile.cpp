@@ -1663,6 +1663,41 @@ void PeFile::Resource::ibufcheck(const void *m, unsigned siz) {
         throwCantUnpack("corrupted resources");
 }
 
+/*
+ * Drop version, icon
+ */
+void PeFile::Resource::cleanse(MemBuffer &ibuf, const char *resBuf) {
+    const res_dir *rnode = ACC_STATIC_CAST(const res_dir *, (const void *)resBuf);
+    ibufcheck(rnode, sizeof(*rnode));
+    int ic = rnode->identr + rnode->namedentr;
+    if (ic == 0)
+        return;
+
+    for (const res_dir_entry *rde = rnode->entries + ic - 1; --ic >= 0; rde--) { // type
+        if (!(rde->tnl == RT_VERSION || rde->tnl == RT_GROUP_ICON || rde->tnl == RT_ICON || rde->tnl == RT_ANIICON)) continue;
+        const res_dir *node2 = ACC_STATIC_CAST(const res_dir *, (const void *)(resBuf + (rde->child & 0x7fffffff)));
+        ibufcheck(node2, sizeof(*node2));
+        int ic2 = node2->identr + node2->namedentr;
+        if (ic2 == 0) continue;
+        for (const res_dir_entry *rde2 = node2->entries + ic2 - 1; --ic2 >= 0; rde2--) { // id
+            const res_dir *node3 = ACC_STATIC_CAST(const res_dir *, (const void *)(resBuf + (rde2->child & 0x7fffffff)));
+            ibufcheck(node3, sizeof(*node3));
+            int ic3 = node3->identr + node3->namedentr;
+            if (ic3 == 0) continue;
+            for (const res_dir_entry *rde3 = node3->entries + ic3 - 1; --ic3 >= 0; rde3--) { // data
+                const res_data *data = ACC_STATIC_CAST(const res_data *, (const void *)(resBuf + (rde3->child & 0x7fffffff)));
+                if (data->size > 0) {
+                    ibuf.fill(data->offset, data->size, FILLVAL);
+                    set_le32((char *const)data + offsetof(res_data, size), 0);
+                }
+            }
+        }
+        // change type to RT_RCDATA (raw)
+        set_le32((char *const)rde, 10);
+    }
+}
+
+
 PeFile::Resource::upx_rnode *PeFile::Resource::convert(const void *rnode, upx_rnode *parent,
                                                        unsigned level) {
     if (level == 3) {
@@ -1697,8 +1732,8 @@ PeFile::Resource::upx_rnode *PeFile::Resource::convert(const void *rnode, upx_rn
     int realIx = -1;
     for (const res_dir_entry *rde = node->entries + ic - 1; --ic >= 0; rde--) {
         // Drop version info
-        if (rde->tnl == RT_VERSION || rde->tnl == RT_GROUP_ICON || rde->tnl == RT_ICON || rde->tnl == RT_ANIICON)
-            continue;
+        // if (rde->tnl == RT_VERSION || rde->tnl == RT_GROUP_ICON || rde->tnl == RT_ICON || rde->tnl == RT_ANIICON)
+        //     continue;
         realIx += 1;
         upx_rnode *child = convert(start + (rde->child & 0x7fffffff), branch, level + 1);
         xcheck(child);
@@ -1826,6 +1861,7 @@ void PeFile::Resource::dump(const upx_rnode *node, unsigned level) const {
 
 void PeFile::Resource::clear(byte *node, unsigned level, Interval *iv) {
     if (level == 3)
+        //rrr: Only directories are included leavaing data untouched.
         iv->add_interval(node, sizeof(res_data));
     else {
         const res_dir *const rd = (res_dir *) node;
@@ -1843,6 +1879,7 @@ bool PeFile::Resource::clear() {
     clear(newstart, 0, &iv);
     iv.flatten();
     if (iv.ivnum == 1)
+        // Clear these directories which are moved to the new clear section
         iv.clear();
 #if TESTING
     if (opt->verbose > 3)
@@ -2304,11 +2341,11 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     } else {
         if (pe_offset > 0x80) {
             // Remove Rich signature
-            int e_lfanew = 0x80;
-            handleStub(fi, fo, e_lfanew);
+            pe_offset = 0x80;
+            handleStub(fi, fo, pe_offset);
             fo->seek(0x3c, SEEK_SET);
-            fo->rewrite(&e_lfanew, 4);
-            fo->seek(e_lfanew, SEEK_SET);
+            fo->rewrite(&pe_offset, 4);
+            fo->seek(pe_offset, SEEK_SET);
         } else {
             handleStub(fi, fo, pe_offset);
         }
@@ -2342,7 +2379,10 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     const unsigned dllstrings = processImports();
     processTls(&tlsiv); // call before processRelocs!!
     processLoadConf(&loadconfiv);
-    processResources(&res);
+    if (last_section_rsrc_only)
+        processResources(&res);
+    else
+        res.cleanse(ibuf, (const char *)ibuf.subref("bad res %#x", IDADDR(PEDIR_RESOURCE), 1));
     processExports(&xport);
     processRelocs();
 
@@ -2378,35 +2418,9 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
     ph.u_len = newvsize + soimport + sorelocs;
 
-    // some extra_info data for uncompression support
-    unsigned s = 0;
-    byte *const p1 = ibuf.subref("bad ph.u_len %#x", ph.u_len, sizeof(ih));
-    memcpy(p1 + s, &ih, sizeof(ih));
-    s += sizeof(ih);
-    memcpy(p1 + s, isection, ih.objects * sizeof(*isection));
-    s += ih.objects * sizeof(*isection);
-    if (soimport) {
-        set_le32(p1 + s, cimports);
-        set_le32(p1 + s + 4, dllstrings);
-        s += 8;
-    }
-    if (sorelocs) {
-        set_le32(p1 + s, crelocs);
-        p1[s + 4] = (byte) (big_relocs & 6);
-        s += 5;
-    }
-    if (soresources) {
-        set_le16(p1 + s, icondir_count);
-        s += 2;
-    }
-    // end of extra_info data
-
     srand(time(NULL));
     int garbageBytes = 512 * (rand() % 4 + 1);
 
-    set_le32(p1 + s, ptr_diff_bytes(p1, ibuf) - rvamin);
-    s += 4;
-    ph.u_len += s;
     obuf.allocForCompression(ph.u_len, garbageBytes);
 
     // prepare packheader
@@ -2565,8 +2579,15 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     const bool rel_at_sections_start = last_section_rsrc_only;
 
     ic = ncsection;
-    if (!last_section_rsrc_only)
-        callProcessResources(res, ic);
+    if (!last_section_rsrc_only) {
+        ODADDR(PEDIR_RESOURCE) = 0;
+        ODSIZE(PEDIR_RESOURCE) = 0;
+        size_t resHeaderOs = pe_offset + offsetof(ht, ddirs) + sizeof(ddirs_t) * PEDIR_RESOURCE;
+        info("resource header offset: %llx", resHeaderOs);
+        linker->defineSymbol("res_dir", resHeaderOs);
+        linker->defineSymbol("res_vaddr", IDADDR(PEDIR_RESOURCE));
+        linker->defineSymbol("res_size", IDSIZE(PEDIR_RESOURCE));
+    }
     if (rel_at_sections_start)
         callProcessStubRelocs(rel, ic);
 
@@ -2710,9 +2731,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     fo->write(oloadconf, soloadconf);
     if ((ic = fo->getBytesWritten() & fam1) != 0)
         fo->write(ibuf, oh.filealign - ic);
-    if (!last_section_rsrc_only)
-        fo->write(oresources, soresources);
-    else
+    if (last_section_rsrc_only)
         fo->write(oxrelocs, soxrelocs);
     fo->write(oimpdlls, soimpdlls);
     fo->write(oexport, soexport);

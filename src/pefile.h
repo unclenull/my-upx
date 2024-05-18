@@ -442,7 +442,7 @@ protected:
         struct upx_rleaf;
 
         MemBuffer mb_start;
-        const byte *start = nullptr;
+        const byte *start = nullptr; // start of resource section
         byte *newstart = nullptr;
         upx_rnode *root = nullptr;
         upx_rleaf *head = nullptr;
@@ -450,7 +450,7 @@ protected:
         unsigned dsize = 0;
         unsigned ssize = 0;
 
-        const byte *ibufstart = nullptr;
+        const byte *ibufstart = nullptr; // image
         const byte *ibufend = nullptr;
 
         void check(const res_dir *, unsigned);
@@ -467,6 +467,8 @@ protected:
         explicit Resource(const byte *p, const byte *ibufstart, const byte *ibufend);
         ~Resource() noexcept;
         void init(const byte *);
+
+        void cleanse(MemBuffer &ibuf, const char *resBuf);
 
         unsigned dirsize() const;
         bool next();

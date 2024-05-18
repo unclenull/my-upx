@@ -101,10 +101,7 @@ section         PEMAIN01
                 xor     rax, rdx
                 mov     [rsi + rcx], rax
                 add     rcx, 8
-                # cmp doesn't accept `dword ptr 1`, use a 4 byte number to ensure encoded as 4 bytes
-                cmp     rcx, 0x10000000
-                # added to it
-                .reloc . - 4, R_X86_64_32, (-0x10000000 + compressed_size)
+                cmp     ecx, IMM32(compressed_size)
                 jb      xor_start
 #
 # DEOBFUSCATE END
@@ -435,6 +432,11 @@ section         PEDEPHAK
                 lea     rax, [rdi + swri]
                 andb    [rax], 0x7f             // marks UPX0 non writeable
                 andb    [rax + 0x28], 0x7f      // marks UPX1 non writeable
+
+                lea     rax, [rdi + res_dir]
+                mov     [rax], IMM32(res_vaddr)
+                add     rax, 4
+                mov     [rax], IMM32(res_size)
 
                 lea     r9, [rsp + 0x20]
                 movq    r8, [r9]                // original protection

@@ -359,6 +359,10 @@ static int do_option(int optc, const char *arg) {
         opt->to_stdout = true;
         break;
 #endif
+    case 'x':
+        opt->pass_xor_key = true;
+        break;
+
     case 'd':
         set_cmd(CMD_DECOMPRESS);
         break;
@@ -797,6 +801,7 @@ static int do_option(int optc, const char *arg) {
         return -1;
     case ':':
         return -2;
+
     default:
         fprintf(stderr, "%s: internal error in getopt (%d)\n", argv0, optc);
         return -3;
