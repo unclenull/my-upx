@@ -274,6 +274,13 @@ section PEIMPORT
                 mov     ax, [rdi]
                 add     rdi, rax
                 sub     rsp, 0x20
+
+                lea     rcx, [rip + LoadLibraryA]
+                call    GetKernel32ProcAddr
+                mov     r13, rax
+                lea     rcx, [rip + GetProcAddress]
+                call    GetKernel32ProcAddr
+                mov     r14, rax
 next_dll:
                 mov     eax, [rdi]
                 or      eax, eax
@@ -283,7 +290,7 @@ next_dll:
                 add     rbx, rsi
                 add     rdi, 8
 
-                call    [rip + LoadLibraryA]
+                call    r13
 
                 xchg    rax, rbp
 next_func:
@@ -315,7 +322,7 @@ section         PEIMPOR2
 first_imp:
                 mov     rcx, rbp
 
-                call    [rip + GetProcAddress]
+                call    r14
 
 #if 1
 ;// FIXME: is this error handling really needed?
@@ -340,7 +347,9 @@ section         PEIERDLL
 section         PEIEREXE
                 add     rsp, 0x28
                 //      rcx contains garbage -> garbage return code
-                jmp     [rip + ExitProcess]
+                lea     rcx, [rip + ExitProcess]
+                call    GetKernel32ProcAddr
+                jmp     rax
 section         PEIMDONE
 imports_done:
                 add     rsp, 0x28
@@ -415,7 +424,9 @@ relhi0:
 
 // =============
 section         PEDEPHAK
-                mov     rbp, [rip + VirtualProtect]
+                lea     rcx, [rip + VirtualProtect]
+                call    GetKernel32ProcAddr
+                mov     rbp, rax
                 lea     rdi, [rsi + vp_base]
                 mov     ebx, IMM32(vp_size)     // 0x1000 or 0x2000
 
@@ -534,10 +545,156 @@ done_callbacks:
                 pop     rsi
                 ret
 
-// =============
-// ============= CUT HERE
-// =============
 
-#include        "include/header.S"
+section         GET_KERNEL32_PROC
+GetKernel32ProcAddr:
+//; File D:\tmp\upx\src\stub\src\GetKernel32Proc.c
+//; Line 26
+LN48:
+	mov	rax, rsp
+	mov	QWORD PTR [rax+8], rbx
+	mov	QWORD PTR [rax+16], rbp
+	mov	QWORD PTR [rax+24], rsi
+	mov	QWORD PTR [rax+32], rdi
+	push	r14
+	sub	rsp, 528				//; 00000210H
+//; Line 31
+	mov	rax, QWORD PTR gs:96
+	mov	r14, rcx
+//; Line 40
+	mov	rdx, QWORD PTR [rax+24]
+	mov	r8, QWORD PTR [rdx+16]
+//; Line 46
+	xor	edx, edx
+	jmp	SHORT LN44_GetProc
+LL2_GetProc:
+//; Line 48
+	mov	r9, QWORD PTR [r8+96]
+	mov	r10b, dl
+	jmp	SHORT LN46_GetProc
+LL6_GetProc:
+//; Line 49
+	lea	eax, DWORD PTR [rcx-65]
+	cmp	ax, 25
+	ja	SHORT LN13_GetProc
+//; Line 50
+	xor	cx, 32					//; 00000020H
+	mov	WORD PTR [r9], cx
+LN13_GetProc:
+//; Line 48
+	movsx	rax, r10b
+	inc	r10b
+	add	r9, 2
+	mov	WORD PTR [rsp+rax*2], cx
+LN46_GetProc:
+	movzx	ecx, WORD PTR [r9]
+	test	cx, cx
+	jne	SHORT LL6_GetProc
+//; Line 55
+	movsx	rax, r10b
+//; Line 56
+        lea	r10, [rip + kernel32]
+	mov	WORD PTR [rsp+rax*2], dx
+	lea	rax, QWORD PTR [rsp]
+	sub	r10, rax
+LL42_GetProc:
+	movzx	ecx, WORD PTR [rax]
+	movzx	r9d, WORD PTR [rax+r10]
+	sub	ecx, r9d
+	jne	SHORT LN43_GetProc
+	add	rax, 2
+	test	r9d, r9d
+	jne	SHORT LL42_GetProc
+LN43_GetProc:
+	test	ecx, ecx
+	je	SHORT LN24_GetProc
+//; Line 60
+	mov	r8, QWORD PTR [r8+16]
+	sub	r8, 16
+LN44_GetProc:
+//; Line 46
+	cmp	QWORD PTR [r8+48], rdx
+	jne	SHORT LL2_GetProc
+LN39_GetProc:
+//; Line 64
+	xor	eax, eax
+LN1_GetProc:
+//; Line 97
+	lea	r11, QWORD PTR [rsp+528]
+	mov	rbx, QWORD PTR [r11+16]
+	mov	rbp, QWORD PTR [r11+24]
+	mov	rsi, QWORD PTR [r11+32]
+	mov	rdi, QWORD PTR [r11+40]
+	mov	rsp, r11
+	pop	r14
+	ret	0
+LN24_GetProc:
+//; Line 57
+	mov	r9, QWORD PTR [r8+48]
+//; Line 63
+	test	r9, r9
+	je	SHORT LN39_GetProc
+//; Line 69
+	movsxd	rax, DWORD PTR [r9+60]
+//; Line 88
+	mov	r8d, edx
+	mov	ecx, DWORD PTR [rax+r9+136]
+	add	rcx, r9
+	mov	edi, DWORD PTR [rcx+28]
+	mov	r10d, DWORD PTR [rcx+32]
+	add	rdi, r9
+	mov	esi, DWORD PTR [rcx+36]
+	add	r10, r9
+	mov	ebp, DWORD PTR [rcx+24]
+	add	rsi, r9
+	test	ebp, ebp
+	je	SHORT LN11_GetProc
+LL12_GetProc:
+//; Line 89
+	mov	eax, DWORD PTR [r10]
+//; Line 90
+	mov	rbx, r14
+	add	rax, r9
+	sub	rbx, rax
+LL40_GetProc:
+	movzx	ecx, BYTE PTR [rax]
+	movzx	r11d, BYTE PTR [rax+rbx]
+	sub	ecx, r11d
+	jne	SHORT LN41_GetProc
+	inc	rax
+	test	r11d, r11d
+	jne	SHORT LL40_GetProc
+LN41_GetProc:
+	test	ecx, ecx
+	je	SHORT LN26_GetProc
+//; Line 88
+	inc	r8d
+	add	r10, 4
+	cmp	r8d, ebp
+	jb	SHORT LL12_GetProc
+//; Line 90
+	jmp	SHORT LN11_GetProc
+LN26_GetProc:
+//; Line 91
+	mov	eax, r8d
+	movzx	ecx, WORD PTR [rsi+rax*2]
+	mov	edx, DWORD PTR [rdi+rcx*4]
+	add	rdx, r9
+LN11_GetProc:
+//; Line 96
+	mov	rax, rdx
+	jmp	LN1_GetProc
+// GetKernel32ProcAddr end
+
+kernel32:
+        .short 'k', 'e', 'r', 'n', 'e', 'l', '3', '2', '.', 'd', 'l', 'l', 0
+LoadLibraryA:
+        .asciz "LoadLibraryA"
+GetProcAddress:
+        .asciz "GetProcAddress"
+ExitProcess:
+        .asciz "ExitProcess"
+VirtualProtect:
+        .asciz "VirtualProtect"
 
 /* vim:set ts=8 sw=8 et: */

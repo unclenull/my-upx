@@ -142,6 +142,8 @@ void PackW64PeAmd64::buildLoader(const Filter *ft) {
         addLoader("PETLSC2");
 
     // addLoader("IDENTSTR,UPX2HEAD");
+
+    addLoader("GET_KERNEL32_PROC");
 }
 
 bool PackW64PeAmd64::needForceOption() const {
@@ -188,16 +190,16 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
         linker->defineSymbol(
             "vp_size", ((addr & 0xfff) + 0x28 >= 0x1000) ? 0x2000 : 0x1000); // 2 pages or 1 page
         linker->defineSymbol("vp_base", addr & ~0xfff);                      // page mask
-        linker->defineSymbol("VirtualProtect", ilinkerGetAddress("kernel32.dll", "VirtualProtect"));
+        // linker->defineSymbol("VirtualProtect", ilinkerGetAddress("kernel32.dll", "VirtualProtect"));
     }
     linker->defineSymbol("start_of_relocs", crelocs);
 
     if (ilinker) {
-        if (!isdll)
-            linker->defineSymbol("ExitProcess", ilinkerGetAddress("kernel32.dll", "ExitProcess"));
-        linker->defineSymbol("GetProcAddress", ilinkerGetAddress("kernel32.dll", "GetProcAddress"));
+        // if (!isdll)
+        //     linker->defineSymbol("ExitProcess", ilinkerGetAddress("kernel32.dll", "ExitProcess"));
+        // linker->defineSymbol("GetProcAddress", ilinkerGetAddress("kernel32.dll", "GetProcAddress"));
         linker->defineSymbol("kernel32_ordinals", myimport);
-        linker->defineSymbol("LoadLibraryA", ilinkerGetAddress("kernel32.dll", "LoadLibraryA"));
+        // linker->defineSymbol("LoadLibraryA", ilinkerGetAddress("kernel32.dll", "LoadLibraryA"));
         linker->defineSymbol("compressed_imports", cimports);
     }
 

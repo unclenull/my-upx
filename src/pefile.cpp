@@ -786,6 +786,7 @@ class PeFile::ImportLinker final : public ElfLinkerAMD64 {
         const char *reltype = thunk_size == 4 ? "R_X86_64_32" : "R_X86_64_64";
         if (ordinal != 0u) {
             addRelocation(thunk, 0, reltype, "*UND*", ordinal | (1ull << (thunk_size * 8 - 1)));
+            count += 1;
         } else if (proc != nullptr) {
             TStr proc_name(name_for_proc(dll, proc, proc_name_id, procname_separator));
             addSection(proc_name, zeros, 2, 1); // 2 bytes of word aligned "hint"
@@ -794,6 +795,7 @@ class PeFile::ImportLinker final : public ElfLinkerAMD64 {
 
             strcat(proc_name, "X");
             addSection(proc_name, proc, strlen(proc), 0); // the name of the symbol
+            count += 1;
         } else
             infoWarning("empty import: %s", dll);
     }
@@ -852,6 +854,7 @@ public:
     }
 
     unsigned build() {
+        if (count == 0) return 0;
         assert(output == nullptr);
         int osize = 4 + 2 * nsections; // upper limit for alignments
         for (unsigned ic = 0; ic < nsections; ic++)
@@ -873,8 +876,7 @@ public:
     }
 
     void relocate_import(unsigned myimport) {
-        assert(nsections > 0);
-        assert(output);
+        if (count == 0) return;
         defineSymbol("*ZSTART", /*0xffffffffff1000ull + 0 * */ myimport);
         ElfLinkerAMD64::relocate();
         // OutputFile::dump("il1.imp", output, outputlen);
@@ -916,6 +918,8 @@ public:
         TStr sdll(name_for_dll((const char *) dll, dll_name_id));
         return findSection(sdll, false) != nullptr;
     }
+
+    int count = 0;
 };
 /*static*/ const char PeFile::ImportLinker::zeros[sizeof(import_desc)] = {0};
 
@@ -1041,7 +1045,7 @@ unsigned PeFile::processImports0(ord_mask_t ord_mask) // pass 1
 
     ilinker = new ImportLinker(sizeof(LEXX));
     // create the new import table
-    addStubImports();
+    // addStubImports();
 
     SPAN_S_VAR(byte, ppi, oimport); // preprocessed imports
 
@@ -1058,11 +1062,14 @@ unsigned PeFile::processImports0(ord_mask_t ord_mask) // pass 1
             // for kernel32.dll we need to put all the imported
             // ordinals into the output import table, as on
             // some versions of windows GetProcAddress does not resolve them
-            if (strcasecmp(idlls[ic]->name, "kernel32.dll") == 0
-                    && idlls[ic]->ordinal
-                    && *idlls[ic]->lookupt & ord_mask
-               ) {
-                kernel32ordinal = true;
+            if (strcasecmp(idlls[ic]->name, "kernel32.dll") == 0 && idlls[ic]->ordinal) {
+                for (const LEXX *tarr = idlls[ic]->lookupt; *tarr; tarr++) {
+                    if (*tarr & ord_mask) {
+                        ilinker->add_import(kernelDll(), *tarr & 0xffff);
+                        kernel32ordinal = true;
+                    }
+
+                }
             }
         }
     }
@@ -2315,7 +2322,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     }
     checkHeaderValues(ih.subsystem, subsystem_mask, ih.entry, ih.filealign);
 
-    // remove certificate directory entry
+    // remove certificate directory entry (in overlay)
     if (IDSIZE(PEDIR_SECURITY))
         IDSIZE(PEDIR_SECURITY) = IDADDR(PEDIR_SECURITY) = 0;
 
@@ -2376,6 +2383,11 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     Interval loadconfiv(ibuf);
     Export xport((char *) (byte *) ibuf);
 
+    // remove delay import
+    if (IDSIZE(PEDIR_DELAY_IMPORT)) {
+        IDSIZE(PEDIR_DELAY_IMPORT) = IDADDR(PEDIR_DELAY_IMPORT) = 0;
+        ibuf.fill(IDADDR(PEDIR_DELAY_IMPORT), IDSIZE(PEDIR_DELAY_IMPORT), FILLVAL);
+    }
     const unsigned dllstrings = processImports();
     processTls(&tlsiv); // call before processRelocs!!
     processLoadConf(&loadconfiv);
@@ -2733,7 +2745,8 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         fo->write(ibuf, oh.filealign - ic);
     if (last_section_rsrc_only)
         fo->write(oxrelocs, soxrelocs);
-    fo->write(oimpdlls, soimpdlls);
+    if (soimpdlls)
+        fo->write(oimpdlls, soimpdlls);
     fo->write(oexport, soexport);
     if (!last_section_rsrc_only)
         fo->write(oxrelocs, soxrelocs);
