@@ -4,7 +4,11 @@
  * with /O2 subroutines are embeded in GetProc although they still exist
  * modify .asm
 %s/\$//g | %s/@/_/g | %s/;/\/\/;/ | %s/moduleName//g
+ * replace kernel32
 lea	r10, [rip + kernel32]
+ * replace kernel32BaseAddr
+lea	r8, [rip + kernel32BaseAddr]
+mov	r8, [r8]
  */
 
 #include <windows.h>
@@ -19,8 +23,9 @@ typedef struct _VS_VERSION_INFO {
 } myVS_VERSION_INFO;
 
 extern PWCHAR kernel32;
+extern PBYTE kernel32BaseAddr;
 
-PVOID GetKernel32Proc(PCHAR exportName) {
+void GetKernel32BaseAddr() {
 #if defined(_WIN64)
 #define PEBOffset 0x60
 #define LdrOffset 0x18
@@ -36,7 +41,6 @@ PVOID GetKernel32Proc(PCHAR exportName) {
   PBYTE pLdr = *(PBYTE *)(pPeb + LdrOffset);
   PLDR_DATA_TABLE_ENTRY pModuleList = *(PLDR_DATA_TABLE_ENTRY *)(pLdr + ListOffset);
 
-  PBYTE baseAddr = NULL;
   WCHAR moduleName[MAX_PATH];
   INT16 mask = 0x20;
 
@@ -51,19 +55,21 @@ PVOID GetKernel32Proc(PCHAR exportName) {
     }
     moduleName[i] = 0;
     if (!wcscmp(moduleName, kernel32)) {
-      baseAddr = pModuleList->DllBase;
+      kernel32BaseAddr = pModuleList->DllBase;
       break;
     }
     pModuleList = (PLDR_DATA_TABLE_ENTRY)((PBYTE)pModuleList->InMemoryOrderLinks.Flink - ListOffset);
   }
+}
 
-  if (!baseAddr) {
+PVOID GetKernel32Proc(PCHAR exportName) {
+  if (!kernel32BaseAddr) {
     return NULL;
   }
 
   PVOID addr = NULL;
-  PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)baseAddr;
-  PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)(baseAddr + dosHeader->e_lfanew);
+  PIMAGE_DOS_HEADER dosHeader = (PIMAGE_DOS_HEADER)kernel32BaseAddr;
+  PIMAGE_NT_HEADERS ntHeaders = (PIMAGE_NT_HEADERS)(kernel32BaseAddr + dosHeader->e_lfanew);
 
   IMAGE_DATA_DIRECTORY exportDirectory = ntHeaders->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT];
   PIMAGE_SECTION_HEADER sectionHeader = IMAGE_FIRST_SECTION(ntHeaders);
@@ -73,7 +79,7 @@ PVOID GetKernel32Proc(PCHAR exportName) {
       break;
     }
   }
-  PBYTE section = baseAddr + sectionHeader->VirtualAddress;
+  PBYTE section = kernel32BaseAddr + sectionHeader->VirtualAddress;
 
   PBYTE exportBaseAddr = section - sectionHeader->VirtualAddress;
 
@@ -85,7 +91,7 @@ PVOID GetKernel32Proc(PCHAR exportName) {
   for (DWORD i = 0; i < exportTable->NumberOfNames; i++) {
     char *functionName = (char*)(exportBaseAddr + addressOfNames[i]);
     if (strcmp(functionName, exportName) == 0) {
-      addr = baseAddr + addressOfFunctions[addressOfNameOrdinals[i]];
+      addr = kernel32BaseAddr + addressOfFunctions[addressOfNameOrdinals[i]];
       break;
     }
   }
