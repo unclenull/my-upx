@@ -67,8 +67,6 @@ protected:
     void preprocessSections(char *start, char const *end);
     void preprocessSymbols(char *start, char const *end);
     void preprocessRelocations(char *start, char const *end);
-    Section *findSection(const char *name, bool fatal = true) const;
-    Symbol *findSymbol(const char *name, bool fatal = true) const;
 
     Symbol *addSymbol(const char *name, const char *section, upx_uint64_t offset);
     Relocation *addRelocation(const char *section, unsigned off, const char *type,
@@ -87,6 +85,9 @@ public:
 #else
     void addLoaderVA(const char *s, ...);
 #endif
+    Section *findSection(const char *name, bool fatal = true) const;
+    Symbol *findSymbol(const char *name, bool fatal = true) const;
+
     Section *addSection(const char *sname, const void *sdata, int slen, unsigned p2align);
     int getSection(const char *sname, int *slen = nullptr) const;
     int getSectionSize(const char *sname) const;

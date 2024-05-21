@@ -2302,6 +2302,23 @@ void PeFile::callProcessResources(Resource &res, unsigned &ic) {
     ic += soresources;
 }
 
+template <typename LEXX>
+LEXX generateXorKey() {
+    LEXX xor_key;
+    xor_key = 0;
+    for (unsigned i = 0; i < sizeof(LEXX); i++) {
+        // ensure each byte has at least one bit set
+        int r = rand();
+        char c = 0;
+        for (unsigned j = 0; j < sizeof(RAND_MAX); j++) {
+            c += ((char *)(&r))[j];
+        }
+        xor_key <<= 8;
+        xor_key += c;
+    }
+    return xor_key;
+}
+
 template <typename LEXX, typename ht>
 void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
                    upx_uint64_t default_imagebase, bool last_section_rsrc_only) {
@@ -2320,9 +2337,10 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         else
             throwCantPack("image forces integrity check (use --force to remove)");
     }
+
     checkHeaderValues(ih.subsystem, subsystem_mask, ih.entry, ih.filealign);
 
-    // remove certificate directory entry (in overlay)
+    // remove certificate directory entry (data in overlay)
     if (IDSIZE(PEDIR_SECURITY))
         IDSIZE(PEDIR_SECURITY) = IDADDR(PEDIR_SECURITY) = 0;
 
@@ -2429,11 +2447,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     crelocs = cimports + soimport; // rva of preprocessed fixups
 
     ph.u_len = newvsize + soimport + sorelocs;
-
-    srand(time(NULL));
-    int garbageBytes = 512 * (rand() % 4 + 1);
-
-    obuf.allocForCompression(ph.u_len, garbageBytes);
+    obuf.allocForCompression(ph.u_len, ph.u_len / 10); // extra 10% for garbage
 
     // prepare packheader
     if (ph.u_len < rvamin) { // readSectionHeaders() should have caught this
@@ -2458,39 +2472,35 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     callCompressWithFilters(ft, filter_strategy, ih.codebase);
 
     /*
-     * OBFUSCATE STARTS
+     * OBFUSCATE COMPRESSED STARTS
      */
-    upx_uint64_t xor_key = rand();
-    for (unsigned i = 0; i < 8; i++) {
-        int r = rand();
-        char c = 0;
-        for (unsigned j = 0; j < 4; j++) {
-            c += ((char *)(&r))[j];
-        }
-        xor_key = xor_key << 8;
-        xor_key += r;
-    }
-    xor_key = xor_key << 32;
-    xor_key += rand();
-    xor_key |= 0x1010101010101010;
-
+    srand(time(NULL));
+    LEXX xor_key_compressed = generateXorKey<LEXX>();
     byte *obufStart = (byte *)obuf.getVoidPtr();
-    for (unsigned i = 0; i < ph.c_len; i+=8) {
-        *(upx_uint64_t *)(obufStart + i) ^= xor_key;
+    for (unsigned i = 0; i < ph.c_len; i += sizeof(LEXX)) {
+        *(LEXX *)(obufStart + i) ^= xor_key_compressed;
     }
-    linker->defineSymbol("xor_key", xor_key);
+    linker->defineSymbol("xor_key_compressed", xor_key_compressed);
     linker->defineSymbol("compressed_size", ph.c_len);
 
-    byte *randomStart = obufStart + ph.c_len;
+    // garbage of max of 10% of the compressed size and within 10k (20 sectors)
+    int maxSectors = ph.c_len / 10 / 512;
+    if (maxSectors > 20) {
+        maxSectors = 20;
+    }
+    srand(time(NULL));
+    int garbageBytes = 512 * (rand() % maxSectors + 1); // at least 1
+
+    byte *garbageStart = obufStart + ph.c_len;
     for (int i = 0; i < garbageBytes; i++) {
-        randomStart[i] = rand() % 256;
+        garbageStart[i] = rand() % 256;
     }
     ph.c_len += garbageBytes;
-    printf("xor_key: 0x%llx\n", xor_key);
+    printf("xor_key_compressed: 0x%llx\n", (upx_uint64_t)xor_key_compressed);
     printf("compressed_size: 0x%x\n", ph.c_len);
     printf("garbage bytes: 0x%x\n", garbageBytes);
     /*
-     * OBFUSCATE ENDS
+     * OBFUSCATE COMPRESSED ENDS
      */
 
     // info: see buildLoader()
@@ -2501,12 +2511,6 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     const int oh_filealign = UPX_MIN(ih.filealign, 0x200);
     const unsigned fam1 = oh_filealign - 1;
 
-    // int identsize = 0;
-    // const unsigned codesize = getLoaderSection("IDENTSTR", &identsize);
-    // assert(identsize > 0);
-    // unsigned ic;
-    // getLoaderSection("UPX1HEAD", (int *) &ic);
-    // identsize += ic;
     int codesize;
     linker->getLoader(&codesize);
 
@@ -2595,7 +2599,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         ODADDR(PEDIR_RESOURCE) = 0;
         ODSIZE(PEDIR_RESOURCE) = 0;
         size_t resHeaderOs = pe_offset + offsetof(ht, ddirs) + sizeof(ddirs_t) * PEDIR_RESOURCE;
-        info("resource header offset: %llx", resHeaderOs);
+        printf("resource header offset: %llx\n", resHeaderOs);
         linker->defineSymbol("res_dir", resHeaderOs);
         linker->defineSymbol("res_vaddr", IDADDR(PEDIR_RESOURCE));
         linker->defineSymbol("res_size", IDSIZE(PEDIR_RESOURCE));
@@ -2627,7 +2631,24 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
     defineSymbols(ncsection, upxsection, sizeof(oh), 0, s1addr);
     defineFilterSymbols(&ft);
+
+    LEXX xor_key_loader = generateXorKey<LEXX>();
+    linker->defineSymbol("xor_key_loader", xor_key_loader);
+    printf("xor_key_loader: 0x%llx\n", (upx_uint64_t)xor_key_loader);
+
     relocateLoader();
+    /*
+     * OBFUSCATE LOADER STARTS
+     */
+    auto *secStart = linker->findSection("START");
+    auto *symEnd = linker->findSymbol("END");
+    upx_uint64_t loaderSize = symEnd->section->offset - secStart->offset + symEnd->offset;
+    for (unsigned i = 0; i < loaderSize; i += sizeof(LEXX)) {
+        *(LEXX *)(secStart->output + i) ^= xor_key_loader;
+    }
+    /*
+     * OBFUSCATE LOADER ENDS
+     */
     const unsigned lsize = getLoaderSize();
     MemBuffer loader(lsize);
     memcpy(loader, getLoader(), lsize);

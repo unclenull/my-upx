@@ -84,7 +84,8 @@ void PackW64PeAmd64::buildLoader(const Filter *ft) {
 
     // prepare loader
     initLoader(stub_amd64_win64_pe, sizeof(stub_amd64_win64_pe), 2);
-    addLoader("START");
+    // addLoader("START");
+    addLoader("PREFIX", "START");
     if (ih.entry && isdll)
         addLoader("PEISDLL0");
     if (isefi)
@@ -228,7 +229,8 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
         linker->defineSymbol("tls_module_base", 0u - rvamin);
     }
 
-    linker->defineSymbol("START", upxsection);
+    linker->defineSymbol("PREFIX", upxsection);
+    // linker->defineSymbol("START", upxsection);
 }
 
 void PackW64PeAmd64::setOhHeaderSize(const pe_section_t *osection) {

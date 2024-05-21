@@ -69,6 +69,18 @@
 // ============= ENTRY POINT
 // =============
 
+section         PREFIX
+                mov     rdx, IMM64(xor_key_loader)
+                lea     rsi, [rip + START]
+                lea     rdi, [rip + END]
+                xor_loader_start:
+                mov     rax, [rsi]
+                xor     rax, rdx
+                mov     [rsi], rax
+                add     rsi, 8
+                cmp     rsi, rdi
+                jb      xor_loader_start
+
 section         START
 section         PEISDLL0
                 mov     [rsp + 8], rcx
@@ -94,15 +106,15 @@ section         PEMAIN01
 #
 # DEOBFUSCATE START
 #
-                mov     rdx, IMM64(xor_key)
+                mov     rdx, IMM64(xor_key_compressed)
                 xor     rcx, rcx
-                xor_start:
+                xor_compressed_start:
                 mov     rax, [rsi + rcx]
                 xor     rax, rdx
                 mov     [rsi + rcx], rax
                 add     rcx, 8
                 cmp     ecx, IMM32(compressed_size)
-                jb      xor_start
+                jb      xor_compressed_start
 #
 # DEOBFUSCATE END
 #
@@ -715,5 +727,8 @@ VirtualProtect:
         .asciz "VirtualProtect"
 kernel32BaseAddr:
         .quad 0
+.global END // keep in the symbol table
+END:
+        .quad 0         // align for xor
 
 /* vim:set ts=8 sw=8 et: */

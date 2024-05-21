@@ -470,6 +470,7 @@ amd64-win64.pe.h : tc_list = amd64-win64.pe default
 amd64-win64.pe.h : tc_bfdname = elf64-x86-64
 amd64-win64.pe.h : tc_objdump_disasm_options = -M intel-mnemonic
 
+# tc.amd64-win64.pe.gcc  = amd64-linux-gcc-4.1.1 -E -v -m64 -nostdinc -MMD -MT $@
 tc.amd64-win64.pe.gcc  = amd64-linux-gcc-4.1.1 -v -m64 -nostdinc -MMD -MT $@
 tc.amd64-win64.pe.gcc += -fno-exceptions -fno-asynchronous-unwind-tables
 tc.amd64-win64.pe.gcc += -Wall -W -Wcast-align -Wcast-qual -Wstrict-prototypes -Wwrite-strings -Werror
