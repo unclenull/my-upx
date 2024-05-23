@@ -2495,7 +2495,6 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     for (int i = 0; i < garbageBytes; i++) {
         garbageStart[i] = rand() % 256;
     }
-    ph.c_len += garbageBytes;
     printf("xor_key_compressed: 0x%llx\n", (upx_uint64_t)xor_key_compressed);
     printf("compressed_size: 0x%x\n", ph.c_len);
     printf("garbage bytes: 0x%x\n", garbageBytes);
@@ -2551,11 +2550,11 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     unsigned c_len = ph.c_len;
     const unsigned aligned_sotls = ALIGN_UP(sotls, (unsigned) sizeof(LEXX));
     const unsigned s1size =
-        ALIGN_UP(c_len + codesize, (unsigned) sizeof(LEXX)) + aligned_sotls + soloadconf;
+        ALIGN_UP(c_len + codesize + garbageBytes, (unsigned) sizeof(LEXX)) + aligned_sotls + soloadconf;
     const unsigned s1addr = (newvsize - c_len + oam1) & ~oam1;
 
     const unsigned ncsection = (s1addr + s1size + oam1) & ~oam1;
-    const unsigned upxsection = s1addr + c_len;
+    const unsigned upxsection = s1addr + c_len + garbageBytes;
 
     Reloc rel(1024); // new stub relocations are put here
     addNewRelocations(rel, upxsection);
@@ -2599,7 +2598,6 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         ODADDR(PEDIR_RESOURCE) = 0;
         ODSIZE(PEDIR_RESOURCE) = 0;
         size_t resHeaderOs = pe_offset + offsetof(ht, ddirs) + sizeof(ddirs_t) * PEDIR_RESOURCE;
-        printf("resource header offset: %llx\n", resHeaderOs);
         linker->defineSymbol("res_dir", resHeaderOs);
         linker->defineSymbol("res_vaddr", IDADDR(PEDIR_RESOURCE));
         linker->defineSymbol("res_size", IDSIZE(PEDIR_RESOURCE));
@@ -2753,7 +2751,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     // fo->write(loader + codesize, identsize);
     fo->seek(osection[!last_section_rsrc_only ? 0 : 1].rawdataptr, SEEK_SET);
     infoWriting("loader", fo->getBytesWritten());
-    fo->write(obuf, c_len);
+    fo->write(obuf, c_len + garbageBytes);
     infoWriting("compressed data", c_len);
     fo->write(loader, codesize);
     if (opt->debug.dump_stub_loader)
