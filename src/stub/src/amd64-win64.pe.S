@@ -70,9 +70,10 @@
 // =============
 
 section         PREFIX
+        // jmp START
                 mov     rdx, IMM64(xor_key_loader)
                 lea     rsi, [rip + START]
-                lea     rdi, [rip + END]
+                lea     rdi, [rip + DATA1_END]
                 xor_loader_start:
                 mov     rax, [rsi]
                 xor     rax, rdx
@@ -96,7 +97,7 @@ section         PEISDLL1
 section         PEMAIN01
                 //; remember to keep stack aligned!
                 lea     rsi, [rip + start_of_compressed]
-                lea     rdi, [rsi + start_of_uncompressed]
+                lea     rdi, [rip + start_of_uncompressed]
                 push    rbp
                 push    rdi
                 push    rsi
@@ -115,7 +116,7 @@ section         PEMAIN01
                 add     rcx, 8
                 cmp     ecx, IMM32(compressed_size)
                 jb      xor_compressed_start
-#
+
 # DEOBFUSCATE END
 #
 
@@ -287,13 +288,11 @@ section PEIMPORT
                 add     rdi, rax
                 sub     rsp, 0x20
 
-                call    GetKernel32BaseAddr
-
                 lea     rcx, [rip + LoadLibraryA]
-                call    GetKernel32Proc
+                call    get_kernel32_proc
                 mov     r13, rax
                 lea     rcx, [rip + GetProcAddress]
-                call    GetKernel32Proc
+                call    get_kernel32_proc
                 mov     r14, rax
 next_dll:
                 mov     eax, [rdi]
@@ -362,7 +361,7 @@ section         PEIEREXE
                 add     rsp, 0x28
                 //      rcx contains garbage -> garbage return code
                 lea     rcx, [rip + ExitProcess]
-                call    GetKernel32Proc
+                call    get_kernel32_proc
                 jmp     rax
 section         PEIMDONE
 imports_done:
@@ -438,10 +437,7 @@ relhi0:
 
 // =============
 section         PEDEPHAK
-                lea     rcx, [rip + VirtualProtect]
-                call    GetKernel32Proc
-                mov     rbp, rax
-                lea     rdi, [rsi + vp_base]
+                lea     rdi, [rip + vp_base]
                 mov     ebx, IMM32(vp_size)     // 0x1000 or 0x2000
 
                 push    rax                     // provide 8 bytes stack
@@ -452,23 +448,20 @@ section         PEDEPHAK
                 mov     rcx, rdi                // address
 
                 sub     rsp, 0x20
-                call    rbp                     // VirtualProtect
+                call    [rip + VirtualProtectAddr]                     // VirtualProtect
 
-                lea     rax, [rdi + swri]
-                andb    [rax], 0x7f             // marks UPX0 non writeable
-                andb    [rax + 0x28], 0x7f      // marks UPX1 non writeable
-
-                lea     rax, [rdi + res_dir]
-                mov     [rax], IMM32(res_vaddr)
-                add     rax, 4
-                mov     [rax], IMM32(res_size)
+                lea     rax, [rdi + dir_table]
+                mov     [rax + 8*2], IMM32(res_vaddr)
+                mov     [rax + 8*2 + 4], IMM32(res_size)
+                mov     [rax + 8*3], IMM32(exc_vaddr)
+                mov     [rax + 8*3 + 4], IMM32(exc_size)
 
                 lea     r9, [rsp + 0x20]
                 movq    r8, [r9]                // original protection
                 mov     rdx, rbx
                 mov     rcx, rdi
 
-                call    rbp
+                call    [rip + VirtualProtectAddr]
                 add     rsp, 0x28
 
 // =============
@@ -559,8 +552,88 @@ done_callbacks:
                 pop     rsi
                 ret
 
+section         DATA1
+LoadLibraryA:
+        .asciz "LoadLibraryA"
+GetProcAddress:
+        .asciz "GetProcAddress"
+ExitProcess:
+        .asciz "ExitProcess"
+.global DATA1_END // keep in the symbol table
+DATA1_END:
+        .quad 0         // align for xor
+
+section         DATA2
+.global kernel32, VirtualProtect, kernel32BaseAddr, VirtualProtectAddr, DATA2_END
+kernel32:
+        .short 'k', 'e', 'r', 'n', 'e', 'l', '3', '2', '.', 'd', 'l', 'l', 0
+VirtualProtect:
+        .asciz "VirtualProtect"
+kernel32BaseAddr:
+        .quad 0
+VirtualProtectAddr:
+        .quad 0
+DATA2_END:
+        .quad 0         // align for xor
 
 section         GET_KERNEL32_PROC
+                // mimic mainCRTStartup
+                sub     rsp, 0x28
+                call    dummpy_func
+                add     rsp, 0x28
+                jmp     unprotect_bootstrap_start
+#
+# UNPROTECT START
+#
+        // jmp unprotect_bootstrap_end
+unprotect_bootstrap_start:
+        // initial protect value
+                sub     rcx, r8 // they are equal (need verify in all OS)
+                inc     ecx
+                xchg    esi, ecx
+                ror     esi, 26  // 0x40
+
+                mov     rdx, IMM64(xor_key_loader)
+                lea     rcx, [rip + data2]
+                lea     r8, [rcx + data2_len]
+                xor_data2_start:
+                mov     rax, [rcx]
+                xor     rax, rdx
+                mov     [rcx], rax
+                add     rcx, 8
+                cmp     rcx, r8
+                jb      xor_data2_start
+unprotect_bootstrap_end:
+                call    GetKernel32BaseAddr
+
+                lea     rcx, [rip + virtual_protect]
+                call    GetKernel32Proc
+                mov     [rip + virtual_protect_addr], rax
+
+
+                sub     rsp, 0x28
+
+                mov     r9, rsp
+                mov     r8d, esi                 // PAGE_EXECUTE_READWRITE
+                lea     rcx, [rip + data_section]                     // VirtualProtect
+                mov     rdx, IMM64(data_section_size)   // size
+                call    [rip + virtual_protect_addr]                     // VirtualProtect
+
+                mov     r9, rsp
+                mov     r8d, esi                 // PAGE_EXECUTE_READWRITE
+                lea     rcx, [rip + bss_section]                     // VirtualProtect
+                mov     rdx, IMM64(bss_section_size)                // size
+                call    [rip + virtual_protect_addr]                     // VirtualProtect
+
+                add     rsp, 0x28
+                lea     rax, [rip + upx_start]
+                sub     rax, rsi
+                jmp     rax
+#
+# UNPROTECT END
+#
+
+.global GetKernel32Proc
 GetKernel32Proc:
 //; File d:\tmp\upx\src\stub\src\GetKernel32Proc.c
 //; Line 61
@@ -572,7 +645,7 @@ LN25:
 	mov	QWORD PTR [rax+32], rdi
 	push	r14
 //; Line 62
-	lea	r8, [rip + kernel32BaseAddr]
+	lea	r8, [rip + kernel32_base_addr]
 	mov	r8, [r8]
 	xor	edx, edx
 	mov	rbp, rcx
@@ -679,7 +752,7 @@ LN24_GetKernel3:
 //; Line 52
 	movsx	rax, r9b
 //; Line 53
-        lea	r9, [rip + kernel32]
+        lea	r9, [rip + kernel_32]
 	mov	WORD PTR [rsp+rax*2], r10w
 	lea	rax, QWORD PTR [rsp]
 	sub	r9, rax
@@ -706,29 +779,14 @@ LN22_GetKernel3:
 LN13_GetKernel3:
 //; Line 54
 	mov	rax, QWORD PTR [rdx+48]
-	lea	r8, [rip + kernel32BaseAddr]
+	lea	r8, [rip + kernel32_base_addr]
 	mov	[r8], rax
 LN3_GetKernel3:
 //; Line 59
 	add	rsp, 536				//; 00000218H
+dummpy_func:
 	ret	0
 // GetKernel32BaseAddr ENDP
-
-// data
-kernel32:
-        .short 'k', 'e', 'r', 'n', 'e', 'l', '3', '2', '.', 'd', 'l', 'l', 0
-LoadLibraryA:
-        .asciz "LoadLibraryA"
-GetProcAddress:
-        .asciz "GetProcAddress"
-ExitProcess:
-        .asciz "ExitProcess"
-VirtualProtect:
-        .asciz "VirtualProtect"
-kernel32BaseAddr:
-        .quad 0
-.global END // keep in the symbol table
-END:
-        .quad 0         // align for xor
+// section         GET_KERNEL32_PROC
 
 /* vim:set ts=8 sw=8 et: */

@@ -33,6 +33,7 @@
 
 class ElfLinker : private noncopyable {
     friend class Packer;
+    friend class PeFile;
 
 public:
     const N_BELE_RTP::AbstractPolicy *const bele; // target endianness

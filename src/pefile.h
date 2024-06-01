@@ -198,10 +198,11 @@ protected:
 
     MemBuffer mb_isection;
     SPAN_0(pe_section_t) isection = nullptr;
+    pe_section_t osection[5];
     bool isdll = false;
     bool isrtm = false;
     bool isefi = false;
-    bool use_dep_hack = true;
+    bool use_dep_hack = false;
     bool use_clear_dirty_stack = true;
     bool use_stub_relocs = true;
 

@@ -33,6 +33,7 @@
 #include "linker.h"
 #include <stdlib.h>
 #include <time.h>
+#include "stub/amd64-win64.pe.h"
 
 #define FILLVAL 0
 #define import  my_import // "import" is a keyword since C++20
@@ -2341,8 +2342,10 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     checkHeaderValues(ih.subsystem, subsystem_mask, ih.entry, ih.filealign);
 
     // remove certificate directory entry (data in overlay)
-    if (IDSIZE(PEDIR_SECURITY))
+    if (IDSIZE(PEDIR_SECURITY)) {
         IDSIZE(PEDIR_SECURITY) = IDADDR(PEDIR_SECURITY) = 0;
+        opt->overlay = opt->STRIP_OVERLAY;
+    }
 
     if (ih.flags & IMAGE_FILE_RELOCS_STRIPPED)
         opt->win32_pe.strip_relocs = true;
@@ -2471,6 +2474,14 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
     callCompressWithFilters(ft, filter_strategy, ih.codebase);
 
+
+    // prepare bootstrap
+    Linker *bsLinker = newLinker();
+    bsLinker->init(stub_amd64_win64_pe, sizeof(stub_amd64_win64_pe));
+    bsLinker->addLoader("GET_KERNEL32_PROC");
+    int bssize;
+    byte *bsloader = bsLinker->getLoader(&bssize);
+
     /*
      * OBFUSCATE COMPRESSED STARTS
      */
@@ -2516,9 +2527,8 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     const bool has_oxrelocs =
         !opt->win32_pe.strip_relocs && (use_stub_relocs || sotls || loadconfiv.ivnum);
     const bool has_ncsection = has_oxrelocs || soimpdlls || soexport || soresources;
-    const unsigned oobjs = last_section_rsrc_only ? 4 : has_ncsection ? 3 : 2;
+    const unsigned oobjs = last_section_rsrc_only ? 5 : has_ncsection ? 4 : 3;
     ////pe_section_t osection[oobjs];
-    pe_section_t osection[4];
     memset(osection, 0, sizeof(osection));
     // section 0 : bss
     //         1 : [ident + header] + packed_data + unpacker + tls + loadconf
@@ -2532,28 +2542,18 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
     // identsplit - number of ident + (upx header) bytes to put into the PE header
     const unsigned sizeof_osection = sizeof(osection[0]) * oobjs;
-    /*
-    int identsplit = pe_offset + sizeof_osection + sizeof(ht);
-    if ((identsplit & fam1) == 0)
-        identsplit = 0;
-    else if (((identsplit + identsize) ^ identsplit) < oh_filealign)
-        identsplit = identsize;
-    else
-        identsplit = ALIGN_GAP(identsplit, oh_filealign);
-    ic = identsize - identsplit;
-
-    const unsigned c_len =
-        ((ph.c_len + ic) & 15) == 0 ? ph.c_len : ph.c_len + 16 - ((ph.c_len + ic) & 15);
-    obuf.clear(ph.c_len, c_len - ph.c_len);
-    */
 
     unsigned c_len = ph.c_len;
     const unsigned aligned_sotls = ALIGN_UP(sotls, (unsigned) sizeof(LEXX));
     const unsigned s1size =
+        // ALIGN_UP(c_len + codesize, (unsigned) sizeof(LEXX)) + aligned_sotls + soloadconf;
         ALIGN_UP(c_len + codesize + garbageBytes, (unsigned) sizeof(LEXX)) + aligned_sotls + soloadconf;
-    const unsigned s1addr = (newvsize - c_len + oam1) & ~oam1;
+    const unsigned s0size = (bssize + fam1) & ~fam1;;
+    const unsigned s0vsize = (s0size + oam1) & ~oam1;;
+    const unsigned s1addr = rvamin + s0vsize;
 
     const unsigned ncsection = (s1addr + s1size + oam1) & ~oam1;
+    // const unsigned upxsection = s1addr + c_len;
     const unsigned upxsection = s1addr + c_len + garbageBytes;
 
     Reloc rel(1024); // new stub relocations are put here
@@ -2563,7 +2563,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     memcpy(&oh, &ih, sizeof(oh));
     oh.filealign = oh_filealign; // identsplit depends on this
 
-    oh.entry = upxsection;
+    oh.entry = rvamin;
     oh.objects = oobjs;
     oh.chksum = 0;
 
@@ -2594,14 +2594,6 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     const bool rel_at_sections_start = last_section_rsrc_only;
 
     ic = ncsection;
-    if (!last_section_rsrc_only) {
-        ODADDR(PEDIR_RESOURCE) = 0;
-        ODSIZE(PEDIR_RESOURCE) = 0;
-        size_t resHeaderOs = pe_offset + offsetof(ht, ddirs) + sizeof(ddirs_t) * PEDIR_RESOURCE;
-        linker->defineSymbol("res_dir", resHeaderOs);
-        linker->defineSymbol("res_vaddr", IDADDR(PEDIR_RESOURCE));
-        linker->defineSymbol("res_size", IDSIZE(PEDIR_RESOURCE));
-    }
     if (rel_at_sections_start)
         callProcessStubRelocs(rel, ic);
 
@@ -2627,31 +2619,6 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     if (last_section_rsrc_only)
         callProcessResources(res, ic = res_start);
 
-    defineSymbols(ncsection, upxsection, sizeof(oh), 0, s1addr);
-    defineFilterSymbols(&ft);
-
-    LEXX xor_key_loader = generateXorKey<LEXX>();
-    linker->defineSymbol("xor_key_loader", xor_key_loader);
-    printf("xor_key_loader: 0x%llx\n", (upx_uint64_t)xor_key_loader);
-
-    relocateLoader();
-    /*
-     * OBFUSCATE LOADER STARTS
-     */
-    auto *secStart = linker->findSection("START");
-    auto *symEnd = linker->findSymbol("END");
-    upx_uint64_t loaderSize = symEnd->section->offset - secStart->offset + symEnd->offset;
-    for (unsigned i = 0; i < loaderSize; i += sizeof(LEXX)) {
-        *(LEXX *)(secStart->output + i) ^= xor_key_loader;
-    }
-    /*
-     * OBFUSCATE LOADER ENDS
-     */
-    const unsigned lsize = getLoaderSize();
-    MemBuffer loader(lsize);
-    memcpy(loader, getLoader(), lsize);
-    // patchPackHeader(loader, lsize);
-
     const unsigned ncsize =
         soxrelocs + soimpdlls + soexport + (!last_section_rsrc_only ? soresources : 0);
     assert((soxrelocs == 0) == !has_oxrelocs);
@@ -2661,10 +2628,11 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     // the end of the relocation data - so we have to increase
     // the virtual size of this section
     const unsigned ncsize_virt_increase = soxrelocs && (ncsize & oam1) == 0 ? 8 : 0;
+    const unsigned ncvsize = (ncsize + ncsize_virt_increase + oam1) & ~oam1;
 
     // fill the sections
-    strcpy(osection[0].name, ".bss");
-    strcpy(osection[1].name, ".text");
+    strcpy(osection[0].name, ".text");
+    strcpy(osection[1].name, ".data");
     // after some windoze debugging I found that the name of the sections
     // DOES matter :( .rsrc is used by oleaut32.dll (TYPELIBS)
     // and because of this lame dll, the resource stuff must be the
@@ -2673,64 +2641,146 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     // ... even worse: exploder.exe in NiceTry also depends on this to
     // locate version info
     strcpy(osection[2].name, !last_section_rsrc_only && soresources ? ".rsrc" : ".rdata");
+    strcpy(osection[3].name, ".bss");
+
+    osection[0].size = s0size;
+    osection[1].size = (s1size + fam1) & ~fam1;
+    osection[2].size = (ncsize + fam1) & ~fam1;
+    osection[3].size = 0;
 
     osection[0].vaddr = rvamin;
     osection[1].vaddr = s1addr;
     osection[2].vaddr = ncsection;
 
-    osection[0].size = 0;
-    osection[1].size = (s1size + fam1) & ~fam1;
-    osection[2].size = (ncsize + fam1) & ~fam1;
-
-    osection[0].vsize = osection[1].vaddr - osection[0].vaddr;
+    osection[0].vsize = s0vsize;
     if (!last_section_rsrc_only) {
         osection[1].vsize = (osection[1].size + oam1) & ~oam1;
-        osection[2].vsize = (osection[2].size + ncsize_virt_increase + oam1) & ~oam1;
-        oh.imagesize = osection[2].vaddr + osection[2].vsize;
+        osection[2].vsize = ncvsize;
+        osection[3].vsize = ph.u_len;
+        osection[3].vaddr = osection[2].vaddr + osection[2].vsize;
+        oh.imagesize = osection[3].vaddr + osection[3].vsize;
         osection[0].rawdataptr = (pe_offset + sizeof(ht) + sizeof_osection + fam1) & ~(size_t) fam1;
-        osection[1].rawdataptr = osection[0].rawdataptr;
+        osection[1].rawdataptr = osection[0].rawdataptr + osection[0].size;
+        osection[2].rawdataptr = osection[1].rawdataptr + osection[1].size;
+        osection[3].rawdataptr = osection[2].rawdataptr + osection[2].size;
     } else {
-        osection[1].vsize = osection[1].size;
         osection[2].vsize = osection[2].size;
-        osection[0].rawdataptr = 0;
-        osection[1].rawdataptr = (pe_offset + sizeof(ht) + sizeof_osection + fam1) & ~(size_t) fam1;
+        osection[3].vsize = osection[3].size;
+        osection[1].rawdataptr = 0;
+        osection[2].rawdataptr = (pe_offset + sizeof(ht) + sizeof_osection + fam1) & ~(size_t) fam1;
     }
-    osection[2].rawdataptr = osection[1].rawdataptr + osection[1].size;
 
-    osection[0].flags = IMAGE_SCN_CNT_UNINITIALIZED_DATA | IMAGE_SCN_MEM_READ |
-                        IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE;
-    osection[1].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE |
-                        IMAGE_SCN_MEM_EXECUTE;
-    osection[2].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+    osection[0].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE;
+    osection[1].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+    osection[2].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ;
+    osection[3].flags = IMAGE_SCN_CNT_UNINITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
 
     if (last_section_rsrc_only) {
-        strcpy(osection[3].name, ".rsrc");
-        osection[3].vaddr = res_start;
-        osection[3].size = (soresources + fam1) & ~fam1;
-        osection[3].vsize = osection[3].size;
-        osection[3].rawdataptr = osection[2].rawdataptr + osection[2].size;
-        osection[2].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ;
+        strcpy(osection[4].name, ".rsrc");
+        osection[4].vaddr = res_start;
+        osection[4].size = (soresources + fam1) & ~fam1;
+        osection[4].vsize = osection[4].size;
+        osection[4].rawdataptr = osection[3].rawdataptr + osection[3].size;
         osection[3].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ;
-        oh.imagesize = (osection[3].vaddr + osection[3].vsize + oam1) & ~oam1;
+        osection[4].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ;
+        oh.imagesize = (osection[4].vaddr + osection[4].vsize + oam1) & ~oam1;
         if (soresources == 0) {
             oh.objects = 3;
-            mem_clear(&osection[3]);
+            mem_clear(&osection[4]);
         }
+    } else {
+        // only works for amd64 (!last_section_rsrc_only) now
+        // restore Resource & Exception table.
+        ODADDR(PEDIR_RESOURCE) = 0;
+        ODSIZE(PEDIR_RESOURCE) = 0;
+        ODADDR(PEDIR_EXCEPTION) = 0;
+        ODSIZE(PEDIR_EXCEPTION) = 0;
+        size_t dirTable = pe_offset + offsetof(ht, ddirs);
+        const int codeOffsetAdded = osection[3].vaddr - ih.codebase;
+        linker->defineSymbol("dir_table", dirTable);
+        linker->defineSymbol("res_vaddr", IDADDR(PEDIR_RESOURCE) + codeOffsetAdded);
+        linker->defineSymbol("res_size", IDSIZE(PEDIR_RESOURCE));
+        linker->defineSymbol("exc_vaddr", IDADDR(PEDIR_EXCEPTION) + codeOffsetAdded);
+        linker->defineSymbol("exc_size", IDSIZE(PEDIR_EXCEPTION));
     }
 
-    oh.bsssize = osection[0].vsize;
-    oh.datasize = osection[2].vsize + (oobjs > 3 ? osection[3].vsize : 0);
+    oh.bsssize = osection[3].vsize;
+    oh.datasize = osection[2].vsize + (oobjs > 3 ? osection[4].vsize : 0);
     setOhDataBase(osection);
     oh.codesize = osection[1].vsize;
     oh.codebase = osection[1].vaddr;
     setOhHeaderSize(osection);
-    if (rvamin < osection[0].rawdataptr) {
+    if (rvamin < osection[1].rawdataptr) {
         throwCantPack("object alignment too small rvamin=%#x oraw=%#x", rvamin,
-                      unsigned(osection[0].rawdataptr));
+                      unsigned(osection[1].rawdataptr));
     }
 
     if (opt->win32_pe.strip_relocs)
         oh.flags |= IMAGE_FILE_RELOCS_STRIPPED;
+
+
+    defineSymbols(ncsection, upxsection, sizeof(oh), 0, s1addr);
+    defineFilterSymbols(&ft);
+
+    LEXX xor_key_loader = generateXorKey<LEXX>();
+    linker->defineSymbol("xor_key_loader", xor_key_loader);
+    printf("xor_key_loader: 0x%llx\n", (upx_uint64_t)xor_key_loader);
+
+    /*
+    * prepare bootstrap starts
+    */
+    bsLinker->defineSymbol("GET_KERNEL32_PROC", rvamin); // relocate the section start address
+    bsLinker->defineSymbol("xor_key_loader", xor_key_loader);
+    bsLinker->defineSymbol("upx_start", upxsection + 0x40); // 0x40 for obfuscation
+    bsLinker->defineSymbol("data_section", osection[1].vaddr);
+    bsLinker->defineSymbol("data_section_size", osection[1].vsize);
+    bsLinker->defineSymbol("bss_section", osection[3].vaddr);
+    bsLinker->defineSymbol("bss_section_size", osection[3].vsize);
+    auto *symDATA2 = linker->findSymbol("DATA2");
+    bsLinker->defineSymbol("data2", symDATA2->section->offset + symDATA2->offset);
+    auto *symDATA2_END = linker->findSymbol("DATA2_END");
+    bsLinker->defineSymbol("data2_len", symDATA2_END->offset + symDATA2->offset);
+    auto *sym = linker->findSymbol("kernel32");
+    bsLinker->defineSymbol("kernel_32", sym->section->offset + sym->offset);
+    sym = linker->findSymbol("VirtualProtect");
+    bsLinker->defineSymbol("virtual_protect", sym->section->offset + sym->offset);
+    sym = linker->findSymbol("kernel32BaseAddr");
+    bsLinker->defineSymbol("kernel32_base_addr", sym->section->offset + sym->offset);
+    sym = linker->findSymbol("VirtualProtectAddr");
+    bsLinker->defineSymbol("virtual_protect_addr", sym->section->offset + sym->offset);
+    bsLinker->relocate();
+    MemBuffer bootstrap(bssize);
+    memcpy(bootstrap, bsloader, bssize);
+    /*
+    * prepare bootstrap ends
+    */
+
+
+    sym = bsLinker->findSymbol("GetKernel32Proc");
+    linker->defineSymbol("get_kernel32_proc", sym->section->offset + sym->offset);
+    relocateLoader();
+    /*
+     * OBFUSCATE LOADER STARTS
+     */
+    auto *secStart = linker->findSection("START");
+    auto *symEnd = linker->findSymbol("DATA1_END");
+    upx_uint64_t obSize = symEnd->section->offset - secStart->offset + symEnd->offset;
+    for (unsigned i = 0; i < obSize; i += sizeof(LEXX)) {
+        *(LEXX *)(secStart->output + i) ^= xor_key_loader;
+    }
+    secStart = linker->findSection("DATA2");
+    symEnd = linker->findSymbol("DATA2_END");
+    obSize = symEnd->section->offset - secStart->offset + symEnd->offset;
+    for (unsigned i = 0; i < obSize; i += sizeof(LEXX)) {
+        *(LEXX *)(secStart->output + i) ^= xor_key_loader;
+    }
+    /*
+     * OBFUSCATE LOADER ENDS
+     */
+    const unsigned lsize = getLoaderSize();
+    MemBuffer loader(lsize);
+    memcpy(loader, getLoader(), lsize);
+
 
     ibuf.clear(0, oh.filealign);
 
@@ -2740,20 +2790,18 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
     // write loader + compressed file
     fo->write(&oh, sizeof(oh));
-    fo->write(osection, sizeof(osection[0]) * oobjs);
-    // some alignment
-    // if (identsplit == identsize) {
-    //     unsigned n = osection[!last_section_rsrc_only ? 0 : 1].rawdataptr - fo->getBytesWritten() -
-    //                  identsize;
-    //     assert(n <= oh.filealign);
-    //     fo->write(ibuf, n);
-    // }
-    // fo->write(loader + codesize, identsize);
+    fo->write(osection, sizeof(osection[1]) * oobjs);
     fo->seek(osection[!last_section_rsrc_only ? 0 : 1].rawdataptr, SEEK_SET);
-    infoWriting("loader", fo->getBytesWritten());
+
+    fo->write(bootstrap, bssize);
+    if ((ic = fo->getBytesWritten() & fam1) != 0)
+        fo->write(ibuf, oh.filealign - ic);
+
+    // fo->write(obuf, c_len);
     fo->write(obuf, c_len + garbageBytes);
     infoWriting("compressed data", c_len);
     fo->write(loader, codesize);
+    infoWriting("loader", codesize);
     if (opt->debug.dump_stub_loader)
         OutputFile::dump(opt->debug.dump_stub_loader, loader, codesize);
     if ((ic = fo->getBytesWritten() & (sizeof(LEXX) - 1)) != 0)
