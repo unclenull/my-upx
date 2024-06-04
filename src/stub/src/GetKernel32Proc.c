@@ -1,7 +1,7 @@
 /*
  * Assembly
- * cl /c /O1 /Oy /FA /DUNICODE /Oi /GS- /Zi D:\programs\tools\c\GetProcAddress.c
- * with /O2 subroutines are embeded in GetProc although they still exist
+ * cl /c /O1 /Oy /FA /DUNICODE /Oi /GS- /Zi GetProcAddress.c
+ * with /O2 subroutines are embeded in GetProc although they still exist as separate functions
  * modify .asm
 %s/\$//g | %s/@/_/g | %s/;/\/\/;/ | %s/moduleName//g
  * replace kernel32

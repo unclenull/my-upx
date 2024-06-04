@@ -1509,9 +1509,14 @@ void PeFile::processLoadConf(Interval *iv) // pass 1
 
     const unsigned lcaddr = IDADDR(PEDIR_LOAD_CONFIG);
     const byte *const loadconf = ibuf.subref("bad loadconf %#x", lcaddr, 4);
-    soloadconf = get_le32(loadconf);
-    if (soloadconf == 0)
+    unsigned _soloadconf = get_le32(loadconf);
+    if (_soloadconf == 0)
         return;
+    // Discard LoadConfig
+    ibuf.fill(lcaddr, soloadconf, FILLVAL);
+    soloadconf = 0;
+    return;
+
     static constexpr unsigned MAX_SOLOADCONF = 256; // XXX FIXME: Why?
     if (soloadconf > MAX_SOLOADCONF)
         info("Load Configuration directory %u > %u", soloadconf, MAX_SOLOADCONF);
@@ -2414,8 +2419,10 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     processLoadConf(&loadconfiv);
     if (last_section_rsrc_only)
         processResources(&res);
-    else
+    else {
+        soresources = 0;
         res.cleanse(ibuf, (const char *)ibuf.subref("bad res %#x", IDADDR(PEDIR_RESOURCE), 1));
+    }
     processExports(&xport);
     processRelocs();
 
@@ -2586,7 +2593,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     ODSIZE(PEDIR_TLS) = aligned_sotls ? (sizeof(LEXX) == 4 ? 0x18 : 0x28) : 0;
     ic += aligned_sotls;
 
-    processLoadConf(&rel, &loadconfiv, ic);
+    // processLoadConf(&rel, &loadconfiv, ic);
     ODADDR(PEDIR_LOAD_CONFIG) = soloadconf ? ic : 0;
     ODSIZE(PEDIR_LOAD_CONFIG) = soloadconf;
     ic += soloadconf;
@@ -2640,29 +2647,36 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     // too idiot to use the data directories... M$ suxx 4 ever!
     // ... even worse: exploder.exe in NiceTry also depends on this to
     // locate version info
-    strcpy(osection[2].name, !last_section_rsrc_only && soresources ? ".rsrc" : ".rdata");
-    strcpy(osection[3].name, ".bss");
+    int bssIndex = 2;
+    if (has_ncsection) {
+        strcpy(osection[2].name, !last_section_rsrc_only && soresources ? ".rsrc" : ".rdata");
+        osection[2].size = (ncsize + fam1) & ~fam1;
+        osection[2].vaddr = ncsection;
+        osection[2].vsize = ncvsize;
+        osection[2].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ;
+        bssIndex = 3;
+    }
+    strcpy(osection[bssIndex].name, ".bss");
 
     osection[0].size = s0size;
     osection[1].size = (s1size + fam1) & ~fam1;
-    osection[2].size = (ncsize + fam1) & ~fam1;
-    osection[3].size = 0;
+    osection[bssIndex].size = 0;
 
     osection[0].vaddr = rvamin;
     osection[1].vaddr = s1addr;
-    osection[2].vaddr = ncsection;
 
     osection[0].vsize = s0vsize;
     if (!last_section_rsrc_only) {
         osection[1].vsize = (osection[1].size + oam1) & ~oam1;
-        osection[2].vsize = ncvsize;
-        osection[3].vsize = ph.u_len;
-        osection[3].vaddr = osection[2].vaddr + osection[2].vsize;
-        oh.imagesize = osection[3].vaddr + osection[3].vsize;
+        osection[bssIndex].vsize = ph.u_len;
+        osection[bssIndex].vaddr = osection[bssIndex-1].vaddr + osection[bssIndex-1].vsize;
+        oh.imagesize = osection[bssIndex].vaddr + osection[bssIndex].vsize;
         osection[0].rawdataptr = (pe_offset + sizeof(ht) + sizeof_osection + fam1) & ~(size_t) fam1;
         osection[1].rawdataptr = osection[0].rawdataptr + osection[0].size;
-        osection[2].rawdataptr = osection[1].rawdataptr + osection[1].size;
-        osection[3].rawdataptr = osection[2].rawdataptr + osection[2].size;
+        if (ncsection) {
+            osection[2].rawdataptr = osection[1].rawdataptr + osection[1].size;
+        }
+        osection[bssIndex].rawdataptr = osection[bssIndex-1].rawdataptr + osection[bssIndex-1].size;
     } else {
         osection[2].vsize = osection[2].size;
         osection[3].vsize = osection[3].size;
@@ -2672,8 +2686,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
     osection[0].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE;
     osection[1].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
-    osection[2].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ;
-    osection[3].flags = IMAGE_SCN_CNT_UNINITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+    osection[bssIndex].flags = IMAGE_SCN_CNT_UNINITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
 
     if (last_section_rsrc_only) {
         strcpy(osection[4].name, ".rsrc");
@@ -2704,11 +2717,11 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         linker->defineSymbol("exc_size", IDSIZE(PEDIR_EXCEPTION));
     }
 
-    oh.bsssize = osection[3].vsize;
+    // oh.bsssize = osection[3].vsize;
     oh.datasize = osection[2].vsize + (oobjs > 3 ? osection[4].vsize : 0);
     setOhDataBase(osection);
-    oh.codesize = osection[1].vsize;
-    oh.codebase = osection[1].vaddr;
+    oh.codesize = osection[0].vsize;
+    oh.codebase = osection[0].vaddr;
     setOhHeaderSize(osection);
     if (rvamin < osection[1].rawdataptr) {
         throwCantPack("object alignment too small rvamin=%#x oraw=%#x", rvamin,
@@ -2719,7 +2732,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         oh.flags |= IMAGE_FILE_RELOCS_STRIPPED;
 
 
-    defineSymbols(ncsection, upxsection, sizeof(oh), 0, s1addr);
+    defineSymbols(ncsection, upxsection, osection[bssIndex].vaddr, 0, s1addr);
     defineFilterSymbols(&ft);
 
     LEXX xor_key_loader = generateXorKey<LEXX>();
@@ -2734,8 +2747,8 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     bsLinker->defineSymbol("upx_start", upxsection + 0x40); // 0x40 for obfuscation
     bsLinker->defineSymbol("data_section", osection[1].vaddr);
     bsLinker->defineSymbol("data_section_size", osection[1].vsize);
-    bsLinker->defineSymbol("bss_section", osection[3].vaddr);
-    bsLinker->defineSymbol("bss_section_size", osection[3].vsize);
+    bsLinker->defineSymbol("bss_section", osection[bssIndex].vaddr);
+    bsLinker->defineSymbol("bss_section_size", osection[bssIndex].vsize);
     auto *symDATA2 = linker->findSymbol("DATA2");
     bsLinker->defineSymbol("data2", symDATA2->section->offset + symDATA2->offset);
     auto *symDATA2_END = linker->findSymbol("DATA2_END");
@@ -2765,9 +2778,9 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     auto *secStart = linker->findSection("START");
     auto *symEnd = linker->findSymbol("DATA1_END");
     upx_uint64_t obSize = symEnd->section->offset - secStart->offset + symEnd->offset;
-    for (unsigned i = 0; i < obSize; i += sizeof(LEXX)) {
-        *(LEXX *)(secStart->output + i) ^= xor_key_loader;
-    }
+    // for (unsigned i = 0; i < obSize; i += sizeof(LEXX)) {
+    //     *(LEXX *)(secStart->output + i) ^= xor_key_loader;
+    // }
     secStart = linker->findSection("DATA2");
     symEnd = linker->findSymbol("DATA2_END");
     obSize = symEnd->section->offset - secStart->offset + symEnd->offset;
@@ -2807,7 +2820,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     if ((ic = fo->getBytesWritten() & (sizeof(LEXX) - 1)) != 0)
         fo->write(ibuf, sizeof(LEXX) - ic);
     fo->write(otls, aligned_sotls);
-    fo->write(oloadconf, soloadconf);
+    // fo->write(oloadconf, soloadconf);
     if ((ic = fo->getBytesWritten() & fam1) != 0)
         fo->write(ibuf, oh.filealign - ic);
     if (last_section_rsrc_only)
