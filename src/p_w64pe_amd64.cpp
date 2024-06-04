@@ -159,10 +159,9 @@ bool PackW64PeAmd64::needForceOption() const {
     return r;
 }
 
-void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsigned sizeof_oh,
+void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsigned uncompressedSection,
                                    unsigned ic, unsigned s1addr) {
     const unsigned myimport = ncsection + soresources - rvamin;
-    unsigned uncompressedSection = osection[3].vaddr;
     // patch loader
     linker->defineSymbol("original_entry", ih.entry + (uncompressedSection - rvamin));
     // if (use_dep_hack) {

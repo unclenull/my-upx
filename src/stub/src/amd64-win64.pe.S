@@ -70,7 +70,7 @@
 // =============
 
 section         PREFIX
-        // jmp START
+        jmp START
                 mov     rdx, IMM64(xor_key_loader)
                 lea     rsi, [rip + START]
                 lea     rdi, [rip + DATA1_END]
