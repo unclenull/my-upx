@@ -1508,9 +1508,14 @@ void PeFile::processLoadConf(Interval *iv) // pass 1
 
     const unsigned lcaddr = IDADDR(PEDIR_LOAD_CONFIG);
     const byte *const loadconf = ibuf.subref("bad loadconf %#x", lcaddr, 4);
-    soloadconf = get_le32(loadconf);
-    if (soloadconf == 0)
+    unsigned _soloadconf = get_le32(loadconf);
+    if (_soloadconf == 0)
         return;
+    // Discard LoadConfig
+    ibuf.fill(lcaddr, soloadconf, FILLVAL);
+    soloadconf = 0;
+    return;
+
     static constexpr unsigned MAX_SOLOADCONF = 256; // XXX FIXME: Why?
     if (soloadconf > MAX_SOLOADCONF)
         info("Load Configuration directory %u > %u", soloadconf, MAX_SOLOADCONF);
@@ -2341,8 +2346,10 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     checkHeaderValues(ih.subsystem, subsystem_mask, ih.entry, ih.filealign);
 
     // remove certificate directory entry (data in overlay)
-    if (IDSIZE(PEDIR_SECURITY))
+    if (IDSIZE(PEDIR_SECURITY)) {
         IDSIZE(PEDIR_SECURITY) = IDADDR(PEDIR_SECURITY) = 0;
+        opt->overlay = opt->STRIP_OVERLAY;
+    }
 
     if (ih.flags & IMAGE_FILE_RELOCS_STRIPPED)
         opt->win32_pe.strip_relocs = true;
@@ -2411,8 +2418,10 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     processLoadConf(&loadconfiv);
     if (last_section_rsrc_only)
         processResources(&res);
-    else
+    else {
+        soresources = 0;
         res.cleanse(ibuf, (const char *)ibuf.subref("bad res %#x", IDADDR(PEDIR_RESOURCE), 1));
+    }
     processExports(&xport);
     processRelocs();
 
@@ -2586,7 +2595,6 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     ODSIZE(PEDIR_TLS) = aligned_sotls ? (sizeof(LEXX) == 4 ? 0x18 : 0x28) : 0;
     ic += aligned_sotls;
 
-    processLoadConf(&rel, &loadconfiv, ic);
     ODADDR(PEDIR_LOAD_CONFIG) = soloadconf ? ic : 0;
     ODSIZE(PEDIR_LOAD_CONFIG) = soloadconf;
     ic += soloadconf;
@@ -2594,14 +2602,6 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     const bool rel_at_sections_start = last_section_rsrc_only;
 
     ic = ncsection;
-    if (!last_section_rsrc_only) {
-        ODADDR(PEDIR_RESOURCE) = 0;
-        ODSIZE(PEDIR_RESOURCE) = 0;
-        size_t resHeaderOs = pe_offset + offsetof(ht, ddirs) + sizeof(ddirs_t) * PEDIR_RESOURCE;
-        linker->defineSymbol("res_dir", resHeaderOs);
-        linker->defineSymbol("res_vaddr", IDADDR(PEDIR_RESOURCE));
-        linker->defineSymbol("res_size", IDSIZE(PEDIR_RESOURCE));
-    }
     if (rel_at_sections_start)
         callProcessStubRelocs(rel, ic);
 
@@ -2626,6 +2626,19 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     const unsigned res_start = (ic + oam1) & ~oam1;
     if (last_section_rsrc_only)
         callProcessResources(res, ic = res_start);
+    else {
+        // only works for amd64 (!last_section_rsrc_only) now
+        // restore Resource & Exception table.
+        ODADDR(PEDIR_RESOURCE) = 0;
+        ODSIZE(PEDIR_RESOURCE) = 0;
+        ODADDR(PEDIR_EXCEPTION) = 0;
+        ODSIZE(PEDIR_EXCEPTION) = 0;
+        linker->defineSymbol("dir_table", pe_offset + offsetof(ht, ddirs));
+        linker->defineSymbol("res_vaddr", IDADDR(PEDIR_RESOURCE));
+        linker->defineSymbol("res_size", IDSIZE(PEDIR_RESOURCE));
+        linker->defineSymbol("exc_vaddr", IDADDR(PEDIR_EXCEPTION));
+        linker->defineSymbol("exc_size", IDSIZE(PEDIR_EXCEPTION));
+    }
 
     defineSymbols(ncsection, upxsection, sizeof(oh), 0, s1addr);
     defineFilterSymbols(&ft);
@@ -2759,7 +2772,6 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     if ((ic = fo->getBytesWritten() & (sizeof(LEXX) - 1)) != 0)
         fo->write(ibuf, sizeof(LEXX) - ic);
     fo->write(otls, aligned_sotls);
-    fo->write(oloadconf, soloadconf);
     if ((ic = fo->getBytesWritten() & fam1) != 0)
         fo->write(ibuf, oh.filealign - ic);
     if (last_section_rsrc_only)

@@ -454,14 +454,11 @@ section         PEDEPHAK
                 sub     rsp, 0x20
                 call    rbp                     // VirtualProtect
 
-                lea     rax, [rdi + swri]
-                andb    [rax], 0x7f             // marks UPX0 non writeable
-                andb    [rax + 0x28], 0x7f      // marks UPX1 non writeable
-
-                lea     rax, [rdi + res_dir]
-                mov     [rax], IMM32(res_vaddr)
-                add     rax, 4
-                mov     [rax], IMM32(res_size)
+                lea     rax, [rdi + dir_table]
+                mov     [rax + 8*2], IMM32(res_vaddr)
+                mov     [rax + 8*2 + 4], IMM32(res_size)
+                mov     [rax + 8*3], IMM32(exc_vaddr)
+                mov     [rax + 8*3 + 4], IMM32(exc_size)
 
                 lea     r9, [rsp + 0x20]
                 movq    r8, [r9]                // original protection

@@ -185,7 +185,7 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
         const unsigned swri = pe_offset + sizeof_oh + sizeof(pe_section_t) - 1;
         // make sure we only touch the minimum number of pages
         const unsigned addr = 0u - rvamin + swri;
-        linker->defineSymbol("swri", addr & 0xfff); // page offset
+        // linker->defineSymbol("swri", addr & 0xfff); // page offset
         // check whether osection[0].flags and osection[1].flags
         // are on the same page
         linker->defineSymbol(
