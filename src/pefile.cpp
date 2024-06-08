@@ -2489,7 +2489,18 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     for (unsigned i = 0; i < ph.c_len; i += sizeof(LEXX)) {
         *(LEXX *)(obufStart + i) ^= xor_key_compressed;
     }
-    linker->defineSymbol("xor_key_compressed", xor_key_compressed);
+    // linker->defineSymbol("xor_key_compressed", xor_key_compressed);
+    char data[256]{0};
+    snprintf(data, sizeof(data), "%s.key", opt->output_name);
+    int fd = ::open(data, O_RDWR | O_CREAT, S_IREAD | S_IWRITE);
+    if (fd != -1) {
+        printf("xor_key_compressed written to %s\n", data);
+        snprintf(data, sizeof(data), "%llx\n", xor_key_compressed);
+        ::write(fd, data, strlen(data));
+        ::close(fd);
+    } else {
+        printf("!!!Failed to write xor_key_compressed\n");
+    }
     linker->defineSymbol("compressed_size", ph.c_len);
 
     // garbage of max of 10% of the compressed size and within 10k (20 sectors)
@@ -2504,7 +2515,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     for (int i = 0; i < garbageBytes; i++) {
         garbageStart[i] = rand() % 256;
     }
-    printf("xor_key_compressed: 0x%llx\n", (upx_uint64_t)xor_key_compressed);
+    printf("xor_key_compressed: %llx\n", (upx_uint64_t)xor_key_compressed);
     printf("compressed_size: 0x%x\n", ph.c_len);
     printf("garbage bytes: 0x%x\n", garbageBytes);
     /*

@@ -104,17 +104,48 @@ section         PEMAIN01
                 push    r15
 
 #
+# get xor_key_compressed from cmdline
+#
+        mov rax, gs:[0x60]
+        mov rax, [rax+0x20]
+        mov cx, [rax+0x70]
+        mov rax, [rax+0x78]
+        movzx rcx, cx
+        add rax, rcx
+        sub rax, 32
+        mov cx, 16
+        xor rbx, rbx
+        xor rdx, rdx
+        xor r8b, r8b
+        convert_loop:
+        mov dx, [rax]
+        sub dx, '0'
+        cmp dx, 9
+        jle add_to_result
+        sub dx, 7
+        cmp dx, 15
+        jle add_to_result
+        sub dx, 32
+        add_to_result:
+        shl rbx, 4
+        add rbx, rdx
+
+        mov [rax], r8b
+        add rax, 2
+        dec cx
+        cmp cx, 0
+        jne convert_loop
+#
 # DEOBFUSCATE START
 #
-                mov     rdx, IMM64(xor_key_compressed)
-                xor     rcx, rcx
-                xor_compressed_start:
-                mov     rax, [rsi + rcx]
-                xor     rax, rdx
-                mov     [rsi + rcx], rax
-                add     rcx, 8
-                cmp     ecx, IMM32(compressed_size)
-                jb      xor_compressed_start
+        xor     rcx, rcx
+        xor_compressed_start:
+        mov     rax, [rsi + rcx]
+        xor     rax, rbx
+        mov     [rsi + rcx], rax
+        add     rcx, 8
+        cmp     ecx, IMM32(compressed_size)
+        jb      xor_compressed_start
 #
 # DEOBFUSCATE END
 #
