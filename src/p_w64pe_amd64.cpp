@@ -85,29 +85,31 @@ void PackW64PeAmd64::buildLoader(const Filter *ft) {
     // prepare loader
     initLoader(stub_amd64_win64_pe, sizeof(stub_amd64_win64_pe), 2);
     // addLoader("START");
-    addLoader("PREFIX", "START");
+    addLoader("START");
     if (ih.entry && isdll)
         addLoader("PEISDLL0");
     if (isefi)
         addLoader("PEISEFI0");
     addLoader(isdll ? "PEISDLL1" : "", "PEMAIN01",
-              icondir_count > 1 ? (icondir_count == 2 ? "PEICONS1" : "PEICONS2") : "",
-              tmp_tlsindex ? "PETLSHAK" : "", "PEMAIN02",
+              tmp_tlsindex ? "PETLSHAK" : ""
+              // ,"PEMAIN02",
               // ph.first_offset_found == 1 ? "PEMAIN03" : "",
-              M_IS_LZMA(ph.method)    ? "LZMA_HEAD,LZMA_ELF00,LZMA_DEC20,LZMA_TAIL"
-              : M_IS_NRV2B(ph.method) ? "NRV_HEAD,NRV2B"
-              : M_IS_NRV2D(ph.method) ? "NRV_HEAD,NRV2D"
-              : M_IS_NRV2E(ph.method) ? "NRV_HEAD,NRV2E"
-                                      : "UNKNOWN_COMPRESSION_METHOD",
+              // M_IS_LZMA(ph.method)    ? "LZMA_HEAD,LZMA_ELF00,LZMA_DEC20,LZMA_TAIL"
+              // : M_IS_NRV2B(ph.method) ? "NRV_HEAD,NRV2B"
+              // : M_IS_NRV2D(ph.method) ? "NRV_HEAD,NRV2D"
+              // : M_IS_NRV2E(ph.method) ? "NRV_HEAD,NRV2E"
+              //                      : "UNKNOWN_COMPRESSION_METHOD",
               // getDecompressorSections(),
-              /*multipass ? "PEMULTIP" :  */ "", "PEMAIN10");
+              /*multipass ? "PEMULTIP" :  */
+              // "", "PEMAIN10"
+              );
     addLoader(tmp_tlsindex ? "PETLSHAK2" : "");
-    if (ft->id) {
-        const unsigned texv = ih.codebase - rvamin;
-        assert(ft->calls > 0);
-        addLoader(texv ? "PECTTPOS" : "PECTTNUL");
-        addLoader("PEFILTER49");
-    }
+    // if (ft->id) {
+    //     const unsigned texv = ih.codebase - rvamin;
+    //     assert(ft->calls > 0);
+    //     addLoader(texv ? "PECTTPOS" : "PECTTNUL");
+    //     addLoader("PEFILTER49");
+    // }
     if (soimport)
         addLoader("PEIMPORT", importbyordinal ? "PEIBYORD" : "", kernel32ordinal ? "PEK32ORD" : "",
                   importbyordinal ? "PEIMORD1" : "", "PEIMPOR2", isdll ? "PEIERDLL" : "PEIEREXE",
@@ -144,7 +146,7 @@ void PackW64PeAmd64::buildLoader(const Filter *ft) {
 
     // addLoader("IDENTSTR,UPX2HEAD");
 
-    addLoader("DATA1", "DATA2");
+    addLoader("WINAPI");
 }
 
 bool PackW64PeAmd64::needForceOption() const {
@@ -159,11 +161,14 @@ bool PackW64PeAmd64::needForceOption() const {
     return r;
 }
 
-void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsigned uncompressedSection,
+void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsigned loaderSize,
                                    unsigned ic, unsigned s1addr) {
+    const unsigned start_of_pe = s1addr + loaderSize;
     const unsigned myimport = ncsection + soresources - rvamin;
     // patch loader
-    linker->defineSymbol("original_entry", ih.entry + (uncompressedSection - rvamin));
+    linker->defineSymbol("original_entry", ih.entry + (start_of_pe - rvamin));
+    linker->defineSymbol("start_of_pe", start_of_pe);
+
     // if (use_dep_hack) {
     //     // This works around a "protection" introduced in MSVCRT80, which
     //     // works like this:
@@ -206,12 +211,6 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
         linker->defineSymbol("compressed_imports", cimports);
     }
 
-    if (M_IS_LZMA(ph.method)) {
-        linker->defineSymbol("lzma_c_len", ph.c_len - 2);
-        linker->defineSymbol("lzma_u_len", ph.u_len);
-    }
-    linker->defineSymbol("filter_buffer_start", ih.codebase - rvamin);
-
     // in case of overlapping decompression, this hack is needed,
     // because windoze zeroes the word pointed by tlsindex before
     // it starts programs
@@ -219,19 +218,12 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
                          (tlsindex + 4 > s1addr) ? get_le32(obuf + tlsindex - s1addr - ic) : 0);
     linker->defineSymbol("tls_address", tlsindex - rvamin);
 
-    linker->defineSymbol("icon_delta", icondir_count - 1);
-    linker->defineSymbol("icon_offset", ncsection + icondir_offset - rvamin);
-
-    const unsigned esi0 = s1addr + ic;
-    linker->defineSymbol("start_of_uncompressed", uncompressedSection);
-    linker->defineSymbol("start_of_compressed", esi0);
-
     if (use_tls_callbacks) {
         linker->defineSymbol("tls_callbacks_ptr", tlscb_ptr - ih.imagebase);
         linker->defineSymbol("tls_module_base", 0u - rvamin);
     }
 
-    linker->defineSymbol("PREFIX", upxsection); // start address, move all sections following
+    linker->defineSymbol("START", s1addr); // start address, move all sections following
     // linker->defineSymbol("START", upxsection);
 }
 

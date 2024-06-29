@@ -33,6 +33,8 @@
 #include "linker.h"
 #include <stdlib.h>
 #include <time.h>
+#include <filesystem>
+#include <random>
 #include "stub/amd64-win64.pe.h"
 
 #define FILLVAL 0
@@ -2238,11 +2240,11 @@ unsigned PeFile::handleStripRelocs(upx_uint64_t ih_imagebase, upx_uint64_t defau
 static unsigned umax(unsigned a, unsigned b) { return (a >= b) ? a : b; }
 
 unsigned PeFile::readSections(unsigned objs, unsigned usize, unsigned ih_filealign,
-                              unsigned ih_datasize) {
+                              unsigned ih_datasize, unsigned extra) {
     const unsigned xtrasize = UPX_MAX(ih_datasize, 65536u) + IDSIZE(PEDIR_IMPORT) +
                               IDSIZE(PEDIR_BOUND_IMPORT) + IDSIZE(PEDIR_IAT) +
                               IDSIZE(PEDIR_DELAY_IMPORT) + IDSIZE(PEDIR_BASERELOC);
-    ibuf.alloc(usize + xtrasize);
+    ibuf.alloc(usize + xtrasize + extra);
 
     // BOUND IMPORT support. FIXME: is this ok?
     ibufgood = isection[0].rawdataptr;
@@ -2310,6 +2312,7 @@ void PeFile::callProcessResources(Resource &res, unsigned &ic) {
 
 template <typename LEXX>
 LEXX generateXorKey() {
+    srand(time(NULL));
     LEXX xor_key;
     xor_key = 0;
     for (unsigned i = 0; i < sizeof(LEXX); i++) {
@@ -2324,6 +2327,18 @@ LEXX generateXorKey() {
     }
     return xor_key;
 }
+
+template< class IntType = int >
+class RandomRangeGen {
+    std::random_device rd;
+    std::mt19937 gen;
+    std::uniform_int_distribution<IntType> distrib;
+public:
+    RandomRangeGen(IntType start, IntType end = std::numeric_limits<IntType>::max()): rd(), gen(rd()), distrib(start, end) {};
+    IntType operator()() {
+        return distrib(gen);
+    };
+};
 
 template <typename LEXX, typename ht>
 void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
@@ -2383,7 +2398,17 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
             handleStub(fi, fo, pe_offset);
         }
     }
-    unsigned overlaystart = readSections(objs, ih.imagesize, ih.filealign, ih.datasize);
+
+    // garbage of max of 10% of the original size and within 10k (20 sectors)
+    int maxSectors = ih.imagesize / 10 / 512;
+    if (maxSectors > 20) {
+        maxSectors = 20;
+    }
+    RandomRangeGen<> sectorGen(3, maxSectors); // at least 3 (decoder has size of 0xff or so)
+    garbage_len = 512 * sectorGen();
+    // garbage_len = 0xa00;
+
+    unsigned overlaystart = readSections(objs, ih.imagesize, ih.filealign, ih.datasize, garbage_len);
     unsigned overlay = file_size_u - stripDebug(overlaystart);
     if (overlay >= file_size_u)
         overlay = 0;
@@ -2428,13 +2453,6 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
     // OutputFile::dump("x1", ibuf, usize);
 
-    // some checks for broken linkers - disable filter if necessary
-    bool allow_filter = true;
-    if (/*FIXME ih.codebase == ih.database
-        ||*/ ih.codebase + ih.codesize > ih.imagesize ||
-        (isection[virta2objnum(ih.codebase, isection, objs)].flags & IMAGE_SCN_CNT_CODE) == 0)
-        allow_filter = false;
-
     const unsigned oam1 = ih.objectalign - 1;
     if (!(1 + oam1) || (1 + oam1) & oam1) { // ih.objectalign is not a power of 2
         char buf[32];
@@ -2457,7 +2475,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     crelocs = cimports + soimport; // rva of preprocessed fixups
 
     ph.u_len = newvsize + soimport + sorelocs;
-    obuf.allocForCompression(ph.u_len, ph.u_len / 10); // extra 10% for garbage
+    // obuf.allocForCompression(ph.u_len, ph.u_len / 10); // extra 10% for garbage
 
     // prepare packheader
     if (ph.u_len < rvamin) { // readSectionHeaders() should have caught this
@@ -2466,75 +2484,69 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         throwInternalError(buf);
     }
     ph.u_len -= rvamin;
-    // prepare filter
-    Filter ft(ph.level);
-    ft.buf_len = ih.codesize;
-    ft.addvalue = ih.codebase - rvamin;
-    // compress
-    int filter_strategy = allow_filter ? 0 : -3;
 
-    // disable filters for files with broken headers
-    if (ih.codebase + ih.codesize > ph.u_len) {
-        ft.buf_len = 1;
-        filter_strategy = -3;
-    }
-
-    callCompressWithFilters(ft, filter_strategy, ih.codebase);
-
+    buildLoader(nullptr);
 
     // prepare bootstrap
     Linker *bsLinker = newLinker();
     bsLinker->init(stub_amd64_win64_pe, sizeof(stub_amd64_win64_pe));
-    bsLinker->addLoader("GET_KERNEL32_PROC");
+    bsLinker->addLoader("UPX_STUB");
     int bssize;
     byte *bsloader = bsLinker->getLoader(&bssize);
+
+    Linker *ldLinker = newLinker();
+    ldLinker->init(stub_amd64_win64_pe, sizeof(stub_amd64_win64_pe));
+    ldLinker->addLoader("LOADER_DECODER");
+    byte *ldloader = ldLinker->getLoader(&loader_decoder_size);
+    printf("loader_decoder_size %x\n", loader_decoder_size);
+
+    Camouflage* camouflage = createCamouflage();
 
     /*
      * OBFUSCATE COMPRESSED STARTS
      */
-    srand(time(NULL));
-    LEXX xor_key_compressed = generateXorKey<LEXX>();
-    byte *obufStart = (byte *)obuf.getVoidPtr();
-    for (unsigned i = 0; i < ph.c_len; i += sizeof(LEXX)) {
-        *(LEXX *)(obufStart + i) ^= xor_key_compressed;
-    }
-    linker->defineSymbol("xor_key_compressed", xor_key_compressed);
-    linker->defineSymbol("compressed_size", ph.c_len);
+    LEXX xor_key_pe = generateXorKey<LEXX>();
+    byte *ibufStart = (byte *)ibuf + rvamin;
 
-    // garbage of max of 10% of the compressed size and within 10k (20 sectors)
-    int maxSectors = ph.c_len / 10 / 512;
-    if (maxSectors > 20) {
-        maxSectors = 20;
+    RandomRangeGen<unsigned __int64> garbageGen(0); // at least 1
+    unsigned __int64 *garbageStart = (unsigned __int64 *)(ibufStart + ph.u_len);
+    for (unsigned i = 0; i < garbage_len/8; i++) {
+        garbageStart[i] = garbageGen();
     }
-    srand(time(NULL));
-    int garbageBytes = 512 * (rand() % maxSectors + 1); // at least 1
 
-    byte *garbageStart = obufStart + ph.c_len;
-    for (int i = 0; i < garbageBytes; i++) {
-        garbageStart[i] = rand() % 256;
+    for (unsigned i = 0; i < ph.u_len; i += sizeof(LEXX)) {
+        LEXX * p = (LEXX *)(ibufStart + i);
+        if (*p != 0) {
+            *p ^= xor_key_pe;
+            *p = (*p << 3) | (*p >> (sizeof(LEXX) * 8 - 3));
+        }
     }
-    printf("xor_key_compressed: 0x%llx\n", (upx_uint64_t)xor_key_compressed);
-    printf("compressed_size: 0x%x\n", ph.c_len);
-    printf("garbage bytes: 0x%x\n", garbageBytes);
+
+    linker->defineSymbol("xor_key_pe", xor_key_pe);
+    linker->defineSymbol("pe_size", ph.u_len);
+
+    printf("xor_key_pe: 0x%llx\n", (upx_uint64_t)xor_key_pe);
+    printf("garbage bytes: 0x%x\n", garbage_len);
     /*
      * OBFUSCATE COMPRESSED ENDS
      */
 
     // info: see buildLoader()
     newvsize = (ph.u_len + rvamin + ph.overlap_overhead + oam1) & ~oam1;
-    if (tlsindex && ((newvsize - ph.c_len - 1024 + oam1) & ~oam1) > tlsindex + 4)
+    if (tlsindex && ((newvsize - ph.u_len - 1024 + oam1) & ~oam1) > tlsindex + 4)
         tlsindex = 0;
 
     const int oh_filealign = UPX_MIN(ih.filealign, 0x200);
     const unsigned fam1 = oh_filealign - 1;
 
-    int codesize;
-    linker->getLoader(&codesize);
+    int loaderSize;
+    linker->getLoader(&loaderSize);
+    printf("loader size %x\n", loaderSize);
 
     const bool has_oxrelocs =
         !opt->win32_pe.strip_relocs && (use_stub_relocs || sotls || loadconfiv.ivnum);
     const bool has_ncsection = has_oxrelocs || soimpdlls || soexport || soresources;
-    const unsigned oobjs = last_section_rsrc_only ? 5 : has_ncsection ? 4 : 3;
+    const unsigned oobjs = last_section_rsrc_only ? 4 : has_ncsection ? 3 : 2;
     ////pe_section_t osection[oobjs];
     memset(osection, 0, sizeof(osection));
     // section 0 : bss
@@ -2550,18 +2562,17 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     // identsplit - number of ident + (upx header) bytes to put into the PE header
     const unsigned sizeof_osection = sizeof(osection[0]) * oobjs;
 
-    unsigned c_len = ph.c_len;
     const unsigned aligned_sotls = ALIGN_UP(sotls, (unsigned) sizeof(LEXX));
     const unsigned s1size =
         // ALIGN_UP(c_len + codesize, (unsigned) sizeof(LEXX)) + aligned_sotls + soloadconf;
-        ALIGN_UP(c_len + codesize + garbageBytes, (unsigned) sizeof(LEXX)) + aligned_sotls + soloadconf;
-    const unsigned s0size = (bssize + fam1) & ~fam1;;
+        ALIGN_UP(ph.u_len + loaderSize + garbage_len, (unsigned) sizeof(LEXX)) + aligned_sotls + soloadconf;
+    const unsigned s0size = (bssize + camouflage->size + fam1) & ~fam1;;
     const unsigned s0vsize = (s0size + oam1) & ~oam1;;
     const unsigned s1addr = rvamin + s0vsize;
 
     const unsigned ncsection = (s1addr + s1size + oam1) & ~oam1;
-    // const unsigned upxsection = s1addr + c_len;
-    const unsigned upxsection = s1addr + c_len + garbageBytes;
+    // const unsigned upxsection = s1addr + ph.u_len;
+    const unsigned upxsection = s1addr + ph.u_len + garbage_len + loaderSize;
 
     Reloc rel(1024); // new stub relocations are put here
     addNewRelocations(rel, upxsection);
@@ -2570,7 +2581,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     memcpy(&oh, &ih, sizeof(oh));
     oh.filealign = oh_filealign; // identsplit depends on this
 
-    oh.entry = rvamin;
+    oh.entry = camouflage->getEntry();
     oh.objects = oobjs;
     oh.chksum = 0;
 
@@ -2647,20 +2658,16 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     // too idiot to use the data directories... M$ suxx 4 ever!
     // ... even worse: exploder.exe in NiceTry also depends on this to
     // locate version info
-    int bssIndex = 2;
     if (has_ncsection) {
         strcpy(osection[2].name, !last_section_rsrc_only && soresources ? ".rsrc" : ".rdata");
         osection[2].size = (ncsize + fam1) & ~fam1;
         osection[2].vaddr = ncsection;
         osection[2].vsize = ncvsize;
         osection[2].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ;
-        bssIndex = 3;
     }
-    strcpy(osection[bssIndex].name, ".bss");
 
     osection[0].size = s0size;
     osection[1].size = (s1size + fam1) & ~fam1;
-    osection[bssIndex].size = 0;
 
     osection[0].vaddr = rvamin;
     osection[1].vaddr = s1addr;
@@ -2668,15 +2675,13 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     osection[0].vsize = s0vsize;
     if (!last_section_rsrc_only) {
         osection[1].vsize = (osection[1].size + oam1) & ~oam1;
-        osection[bssIndex].vsize = ph.u_len;
-        osection[bssIndex].vaddr = osection[bssIndex-1].vaddr + osection[bssIndex-1].vsize;
-        oh.imagesize = osection[bssIndex].vaddr + osection[bssIndex].vsize;
         osection[0].rawdataptr = (pe_offset + sizeof(ht) + sizeof_osection + fam1) & ~(size_t) fam1;
         osection[1].rawdataptr = osection[0].rawdataptr + osection[0].size;
-        if (ncsection) {
+        if (has_ncsection) {
             osection[2].rawdataptr = osection[1].rawdataptr + osection[1].size;
         }
-        osection[bssIndex].rawdataptr = osection[bssIndex-1].rawdataptr + osection[bssIndex-1].size;
+        int lastIndex = has_ncsection ? 2 : 1;
+        oh.imagesize = osection[lastIndex].vaddr + osection[lastIndex].vsize;
     } else {
         osection[2].vsize = osection[2].size;
         osection[3].vsize = osection[3].size;
@@ -2685,8 +2690,11 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     }
 
     osection[0].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE;
-    osection[1].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
-    osection[bssIndex].flags = IMAGE_SCN_CNT_UNINITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+    // osection[1].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+    osection[1].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE;
+    if (has_ncsection) {
+        osection[2].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+    }
 
     if (last_section_rsrc_only) {
         strcpy(osection[4].name, ".rsrc");
@@ -2717,13 +2725,12 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         linker->defineSymbol("exc_size", IDSIZE(PEDIR_EXCEPTION));
     }
 
-    // oh.bsssize = osection[3].vsize;
-    oh.datasize = osection[2].vsize + (oobjs > 3 ? osection[4].vsize : 0);
+    oh.datasize = osection[1].vsize + (oobjs > 3 ? osection[2].vsize : 0);
     setOhDataBase(osection);
     oh.codesize = osection[0].vsize;
     oh.codebase = osection[0].vaddr;
     setOhHeaderSize(osection);
-    if (rvamin < osection[1].rawdataptr) {
+    if (rvamin < osection[0].rawdataptr) {
         throwCantPack("object alignment too small rvamin=%#x oraw=%#x", rvamin,
                       unsigned(osection[1].rawdataptr));
     }
@@ -2732,35 +2739,27 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         oh.flags |= IMAGE_FILE_RELOCS_STRIPPED;
 
 
-    defineSymbols(ncsection, upxsection, osection[bssIndex].vaddr, 0, s1addr);
-    defineFilterSymbols(&ft);
+    defineSymbols(ncsection, upxsection, loaderSize, 0, s1addr);
 
-    LEXX xor_key_loader = generateXorKey<LEXX>();
-    linker->defineSymbol("xor_key_loader", xor_key_loader);
-    printf("xor_key_loader: 0x%llx\n", (upx_uint64_t)xor_key_loader);
+    relocateLoader();
+
+    RandomRangeGen<> offsetGen(0, garbage_len - loader_decoder_size);
+    loader_decoder_offset_in_garbage = offsetGen();
+    unsigned ldRva = s1addr + loaderSize + ph.u_len + loader_decoder_offset_in_garbage;
+    printf("loader_decoder_offset_in_garbage %x\n", loader_decoder_offset_in_garbage);
+
+
+    camouflage->postFix(this);
 
     /*
     * prepare bootstrap starts
     */
-    bsLinker->defineSymbol("GET_KERNEL32_PROC", rvamin); // relocate the section start address
-    bsLinker->defineSymbol("xor_key_loader", xor_key_loader);
-    bsLinker->defineSymbol("upx_start", upxsection + 0x40); // 0x40 for obfuscation
-    bsLinker->defineSymbol("data_section", osection[1].vaddr);
-    bsLinker->defineSymbol("data_section_size", osection[1].vsize);
-    bsLinker->defineSymbol("bss_section", osection[bssIndex].vaddr);
-    bsLinker->defineSymbol("bss_section_size", osection[bssIndex].vsize);
-    auto *symDATA2 = linker->findSymbol("DATA2");
-    bsLinker->defineSymbol("data2", symDATA2->section->offset + symDATA2->offset);
-    auto *symDATA2_END = linker->findSymbol("DATA2_END");
-    bsLinker->defineSymbol("data2_len", symDATA2_END->offset + symDATA2->offset);
-    auto *sym = linker->findSymbol("kernel32");
-    bsLinker->defineSymbol("kernel_32", sym->section->offset + sym->offset);
-    sym = linker->findSymbol("VirtualProtect");
-    bsLinker->defineSymbol("virtual_protect", sym->section->offset + sym->offset);
-    sym = linker->findSymbol("kernel32BaseAddr");
-    bsLinker->defineSymbol("kernel32_base_addr", sym->section->offset + sym->offset);
-    sym = linker->findSymbol("VirtualProtectAddr");
-    bsLinker->defineSymbol("virtual_protect_addr", sym->section->offset + sym->offset);
+    bsLinker->defineSymbol("UPX_STUB", rvamin + camouflage->size); // relocate the section start address
+    unsigned ldOffsetFromCoverup = ldRva - camouflage->coverup;
+    printf("loader_decoder_offset_from_coverup %x\n", ldOffsetFromCoverup);
+    bsLinker->defineSymbol("loader_decoder_offset_from_coverup_low", 0xffff - ldOffsetFromCoverup & 0xffff);
+    bsLinker->defineSymbol("loader_decoder_offset_from_coverup_high", 0xffff - (ldOffsetFromCoverup >> 16));
+    bsLinker->defineSymbol("coverup_call", camouflage->coverup);
     bsLinker->relocate();
     MemBuffer bootstrap(bssize);
     memcpy(bootstrap, bsloader, bssize);
@@ -2768,55 +2767,55 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     * prepare bootstrap ends
     */
 
+    /*
+    */
+    ldLinker->defineSymbol("LOADER_DECODER", ldRva);
+    ldLinker->defineSymbol("upx_start_complement", 0xffff - osection[1].vaddr);
+    RandomRangeGen<> loaderSizeVariantsGen(10, loaderSize - 10);
+    unsigned loaderSizeVariant1 = loaderSizeVariantsGen();
+    ldLinker->defineSymbol("loader_size_addend1", loaderSizeVariant1);
+    ldLinker->defineSymbol("loader_size_addend2", loaderSize - loaderSizeVariant1);
+    ldLinker->relocate();
+    byte *ldStart = (byte *)ibuf + rvamin + ph.u_len + loader_decoder_offset_in_garbage;
+    memcpy(ldStart, ldloader, loader_decoder_size);
 
-    sym = bsLinker->findSymbol("GetKernel32Proc");
-    linker->defineSymbol("get_kernel32_proc", sym->section->offset + sym->offset);
-    relocateLoader();
     /*
      * OBFUSCATE LOADER STARTS
      */
+
     auto *secStart = linker->findSection("START");
-    auto *symEnd = linker->findSymbol("DATA1_END");
+    auto *symEnd = linker->findSymbol("END");
     upx_uint64_t obSize = symEnd->section->offset - secStart->offset + symEnd->offset;
-    // for (unsigned i = 0; i < obSize; i += sizeof(LEXX)) {
-    //     *(LEXX *)(secStart->output + i) ^= xor_key_loader;
-    // }
-    secStart = linker->findSection("DATA2");
-    symEnd = linker->findSymbol("DATA2_END");
-    obSize = symEnd->section->offset - secStart->offset + symEnd->offset;
-    for (unsigned i = 0; i < obSize; i += sizeof(LEXX)) {
-        *(LEXX *)(secStart->output + i) ^= xor_key_loader;
+    char xor_key = ldOffsetFromCoverup & 0xff;
+    xor_key = xor_key ^ ((ldOffsetFromCoverup >> 8) & 0xff);
+    printf("loader_xor_key %x\n", xor_key);
+    for (unsigned i = 0; i < obSize; i++) {
+        *(char *)(secStart->output + i) ^= xor_key;
     }
     /*
      * OBFUSCATE LOADER ENDS
      */
-    const unsigned lsize = getLoaderSize();
-    MemBuffer loader(lsize);
-    memcpy(loader, getLoader(), lsize);
-
 
     ibuf.clear(0, oh.filealign);
 
     info("Image size change: %u -> %u KiB", ih.imagesize / 1024, oh.imagesize / 1024);
 
     infoHeader("[Writing compressed file]");
-
-    // write loader + compressed file
     fo->write(&oh, sizeof(oh));
     fo->write(osection, sizeof(osection[1]) * oobjs);
     fo->seek(osection[!last_section_rsrc_only ? 0 : 1].rawdataptr, SEEK_SET);
 
+    fo->write(camouflage->getInBuf(), camouflage->size);
     fo->write(bootstrap, bssize);
     if ((ic = fo->getBytesWritten() & fam1) != 0)
         fo->write(ibuf, oh.filealign - ic);
 
     // fo->write(obuf, c_len);
-    fo->write(obuf, c_len + garbageBytes);
-    infoWriting("compressed data", c_len);
-    fo->write(loader, codesize);
-    infoWriting("loader", codesize);
+    fo->write(getLoader(), loaderSize);
+    infoWriting("loader", loaderSize);
+    fo->write(ibuf + rvamin, ph.u_len + garbage_len);
     if (opt->debug.dump_stub_loader)
-        OutputFile::dump(opt->debug.dump_stub_loader, loader, codesize);
+        OutputFile::dump(opt->debug.dump_stub_loader, getLoader(), loaderSize);
     if ((ic = fo->getBytesWritten() & (sizeof(LEXX) - 1)) != 0)
         fo->write(ibuf, sizeof(LEXX) - ic);
     fo->write(otls, aligned_sotls);
@@ -2860,11 +2859,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     // verifyOverlappingDecompression();
 
     // copy the overlay
-    copyOverlay(fo, overlay, obuf);
-
-    // finally check the compression ratio
-    if (!checkFinalCompressionRatio(fo))
-        throwNotCompressible();
+    copyOverlay(fo, overlay, ibuf);
 }
 
 /*************************************************************************
@@ -3268,6 +3263,23 @@ upx_uint64_t PeFile::ilinkerGetAddress(const char *d, const char *n) const {
     return ilinker->getAddress(d, n);
 }
 
+std::vector<std::string> PeFile::getCamouflageFiles(const char * folder) {
+    std::vector<std::string> files;
+    for (const auto & entry : std::filesystem::directory_iterator(folder)) {
+        // 5k-50k/0xc800/51200
+        if (entry.is_regular_file() && (entry.file_size() >= 1024 * 5) && (entry.file_size() <= 1024 * 50)) {
+            auto ext = entry.path().extension();
+            if (ext == ".exe") {
+                files.push_back(entry.path().string());
+            }
+        }
+    }
+    if (files.empty()) {
+        throw std::runtime_error("No camouflage files found!");
+    }
+    return files;
+}
+
 PeFile::~PeFile() noexcept {
     oimpdlls = nullptr;
     delete[] oxrelocs;
@@ -3388,6 +3400,157 @@ void PeFile64::processTls(Reloc *r, const Interval *iv, unsigned a) {
     processTls2<LE64>(r, iv, a, ih.imagebase);
 }
 
+Camouflage* PeFile32::createCamouflage() { return new Camouflage32(); };
+Camouflage* PeFile64::createCamouflage() { return new Camouflage64(); };
+
+Camouflage64::Camouflage64() : PeFile64(&InputFile()) {
+    std::vector<std::string> files = getCamouflageFiles(camouflageFolder);
+    RandomRangeGen<> randGen(0, files.size() - 1);
+    std::string p;
+    while (true) {
+        p = files[randGen()];
+        // p = "c:\\windows\\system32\\RunLegacyCPLElevated.exe";
+        fi->sopen(p.c_str(), O_BINARY | O_RDONLY, SH_DENYNO);
+        file_size = upx_int64_t(fi->st_size());
+        readFileHeader();
+        if (IDSIZE(PEDIR_COM_DESCRIPTOR) > 0) { // dotnet
+            continue;
+        }
+        if (ih.codesize > 0 && ih.entry > 0) {
+            break;
+        }
+    }
+    printf("Camouflage: %s\n", p.c_str());
+
+    readSectionHeaders(ih.objects, sizeof(ih));
+
+    size = isection[0].size;
+
+    ibuf.alloc(size);
+    fi->seek(isection[0].rawdataptr, SEEK_SET);
+    fi->readx(ibuf, size);
+
+    char *base = (char *)ibuf.getVoidPtr();
+    __int64 *p64 = (__int64 *) (base + size);
+    while(*(--p64) == 0) {} // drop trailing qword of zeros;
+    size = (char *)p64 - base + 8;
+
+    // patch
+    char *entry = base + ih.entry - ih.codebase;
+    assert(*(entry + 13) == 0xe9);
+    char *__mainCRTStartup = entry + 18 + *(int *)(entry + 14);
+
+    char *target = __mainCRTStartup;
+    while (*(++target) != 0xe8 && target - __mainCRTStartup < 0x20) {}
+    if (target - __mainCRTStartup < 0x20) {
+        call = (int *)(target + 1);
+
+        target = (char *)call + 4; // find a call to jmp stub
+        while ((++target) - __mainCRTStartup < 0xff) {
+            if (*target != 0xe8) continue;
+
+            char *redirect = target + 5 + *(int *)(target + 1);
+            if (*(__int16 *)redirect == 0x25ff) {
+                coverup = redirect - base; // offset
+                return;
+            }
+        }
+        throw std::runtime_error("Can't find a call to jmp stub");
+    }
+
+    char *lock = __mainCRTStartup;
+    while (*(unsigned *)(++lock) != 0xB10F48F0) {
+        if (lock - __mainCRTStartup > 0x100) {
+            throw std::runtime_error("Can't find the __native_startup_lock address");
+        }
+    }
+    __native_startup_lock = (int *)(lock + 5);
+
+    char *__imp_GetStartupInfoW = __mainCRTStartup;
+    while (*(__int16 *)(++__imp_GetStartupInfoW) != 0x15ff && __imp_GetStartupInfoW < lock) {}
+
+    if (__imp_GetStartupInfoW < lock) {
+        // replace with mov
+        unsigned displacement;
+        RandomRangeGen<> randGen(1, 8);
+        while((displacement = randGen()) == 4){}; // already used
+        *(unsigned *)__imp_GetStartupInfoW = 0x244c8944; // mov [rsp + ?], rcx
+        *(__imp_GetStartupInfoW + 4) = 8 * displacement; // displacement (0 - 8bytes)
+        *(__int16 *)(__imp_GetStartupInfoW + 5) = (__int16)0xC931; // xor ecx, ecx
+    }
+
+    char *state = (char *)__native_startup_lock;
+    while (*(unsigned *)(++state) != 1 || *(__int16 *)(state + 4) != 0x058b) {
+        if (state - (char *)__native_startup_lock > 0x80) {
+            throw std::runtime_error("Can't find the __native_startup_lock address");
+        }
+    }
+    __native_startup_state = (int *)(state + 6);
+
+    char *_amsg_exit_0 = (char *)__native_startup_state;
+    while (*(++_amsg_exit_0) != 0xe8) {
+        if (_amsg_exit_0 - (char *)__native_startup_state > 0x40) {
+            throw std::runtime_error("Can't find the __native_startup_lock address");
+        }
+    }
+
+    call = (int *)(_amsg_exit_0 + 1);
+
+    __int16 *redirect = (__int16 *)((char *)(call + 1) + *call);
+    assert(*redirect == 0x25ff);
+    coverup = (char *)redirect - base; // offset
+}
+void Camouflage64::postFix(PeFile *host) {
+    char *base = (char *)ibuf.getVoidPtr();
+    // go to the bootstrap code
+    *(int *)call = size - ((char *)call + 4 - base);
+    coverup += host->rvamin; // rva
+
+    if (__native_startup_lock == 0) {
+        return;
+    }
+    char *baseHost = (char *)host->ibuf.getVoidPtr();
+    unsigned loaderSize = host->getLoaderSize();
+    // route to the _amsg_exit_0
+    // randomly pick a qword in the garbage
+    // prevent overlapping with LOADER_DECODER
+    const unsigned align = 8;
+    const unsigned data_size = 16;
+    const unsigned decoderStart = host->loader_decoder_offset_in_garbage;
+    const unsigned decoderEnd = decoderStart + host->loader_decoder_size;
+    unsigned randomStart = align;
+    if (decoderStart < randomStart + data_size) {
+        randomStart += decoderEnd;
+    }
+    unsigned randomEnd = host->garbage_len - data_size;
+    if (randomEnd < decoderEnd + align) {
+        randomEnd = decoderStart - data_size;
+    }
+
+    RandomRangeGen<> offsetGen(randomStart, randomEnd);
+    unsigned offset;
+    // while ((offset = offsetGen()) > (decoderStart - data_size) && offset < decoderEnd) {};
+    unsigned counter = 0;
+    do {
+        offset = offsetGen();
+        counter += 1;
+    } while (offset > (decoderStart - data_size) && offset < (decoderEnd + align));
+    printf("offsetGen times: %d\n", counter);
+    printf("offset %x, randomStart %x, randomEnd %x, decoderStart %x, decoderEnd %x\n", offset, randomStart, randomEnd, decoderStart, decoderEnd);
+    // printf("offset %x < %x = %x, %x > %x = %x\n", offset, (decoderStart - data_size), offset < (decoderStart - data_size), offset, decoderEnd, offset > decoderEnd);
+    unsigned lockOffset = (loaderSize + host->ph.u_len + offset) & ~(align-1);
+    *__native_startup_lock = host->osection[0].vsize - ((char *)__native_startup_lock + 4 - base) + lockOffset;
+
+    char * lockMem = baseHost + host->rvamin + lockOffset - loaderSize;
+
+    printf("loaderSize %x, host->ph.u_len %x\n", loaderSize , host->ph.u_len);
+    printf("lockOffset %x, lockOffset - loaderSize %x, *__native_startup_lock %x\n", lockOffset, lockOffset - loaderSize, *__native_startup_lock);
+    *(__int64 *)(lockMem) = 0; // should be zero for jmp
+
+    // the following dword
+    *__native_startup_state = host->osection[0].vsize - ((char *)__native_startup_state + 4 - base) + lockOffset + 8;
+    *(int *)(lockMem + 8) = 1; // should be 1
+}
 /*
  extra_info added to help uncompression:
 

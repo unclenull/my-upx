@@ -1,46 +1,3 @@
-/*
-;  AMD64-win64.pe.S -- loader & decompressor for the w64/pe32+ format
-;
-;  This file is part of the UPX executable compressor.
-;
-;  Copyright (C) 1996-2024 Markus Franz Xaver Johannes Oberhumer
-;  Copyright (C) 1996-2024 Laszlo Molnar
-;  All Rights Reserved.
-;
-;  UPX and the UCL library are free software; you can redistribute them
-;  and/or modify them under the terms of the GNU General Public License as
-;  published by the Free Software Foundation; either version 2 of
-;  the License, or (at your option) any later version.
-;
-;  This program is distributed in the hope that it will be useful,
-;  but WITHOUT ANY WARRANTY; without even the implied warranty of
-;  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;  GNU General Public License for more details.
-;
-;  You should have received a copy of the GNU General Public License
-;  along with this program; see the file COPYING.
-;  If not, write to the Free Software Foundation, Inc.,
-;  59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
-;
-;  Markus F.X.J. Oberhumer              Laszlo Molnar
-;  <markus@oberhumer.com>               <ezerotven+github@gmail.com>
-;
-;---------------------------------------------------------------------
-;
-; 64 bit modifications (C) 2010 Stefan Widmann
-;
-; Major changes when porting 32 bit code to 64 bit:
-;  - there are no pusha/popa instructions
-;  - since we cannot use pusha/popa, we save rbx, rsi, rdi and rbp instead
-;  - inc <reg> are now being encoded in 2 byte instructions
-;  - functions use fast call calling convention (parameters are passed in registers)
-;    rcx, rdx,  r8, r9
-;  - caller is responsible for stack allocation for callee
-;  - caller cleans up stack
-;  - caller must keep the stack 16 byte aligned, 32 bytes shadow space on stack
-; For more information about the 64 bit calling convention see http://blogs.msdn.com/oldnewthing/archive/2004/01/14/58579.aspx
-*/
-
 #include "arch/amd64/macros.S"
 
 #define         IMM8(value) byte ptr 0; \
@@ -69,20 +26,8 @@
 // ============= ENTRY POINT
 // =============
 
-section         PREFIX
-        jmp START
-                mov     rdx, IMM64(xor_key_loader)
-                lea     rsi, [rip + START]
-                lea     rdi, [rip + DATA1_END]
-                xor_loader_start:
-                mov     rax, [rsi]
-                xor     rax, rdx
-                mov     [rsi], rax
-                add     rsi, 8
-                cmp     rsi, rdi
-                jb      xor_loader_start
-
 section         START
+
 section         PEISDLL0
                 mov     [rsp + 8], rcx
                 mov     [rsp + 0x10], rdx
@@ -96,185 +41,54 @@ section         PEISDLL1
                 jnz     reloc_end_jmp
 section         PEMAIN01
                 //; remember to keep stack aligned!
-                lea     rsi, [rip + start_of_compressed]
-                lea     rdi, [rip + start_of_uncompressed]
                 push    rbp
                 push    rdi
                 push    rsi
                 push    rbx
                 push    r15
+                # already 16 aligned when ret from xor decoder
+                # push with odd number to mimic being called
 
+                sub     rsp, 0x28
+                call    GetKernel32BaseAddr
+                lea     rcx, [rip + VirtualProtect]
+                call    GetKernel32Proc
+                mov     [rip + VirtualProtectAddr], rax
+                add     rsp, 0x28
+
+                lea     rsi, [rip + start_of_pe]
+                mov     rdi, rsi
 #
 # DEOBFUSCATE START
 #
-                mov     rdx, IMM64(xor_key_compressed)
+                mov     rdx, IMM64(xor_key_pe)
                 xor     rcx, rcx
-                xor_compressed_start:
+                xor_pe_start:
                 mov     rax, [rsi + rcx]
+                test    rax, rax
+                jz      skip_xor_pe
+                ror     rax, 3
                 xor     rax, rdx
                 mov     [rsi + rcx], rax
+                skip_xor_pe:
                 add     rcx, 8
-                cmp     ecx, IMM32(compressed_size)
-                jb      xor_compressed_start
+                cmp     ecx, IMM32(pe_size)
+                jb      xor_pe_start
 
 # DEOBFUSCATE END
 #
 
 
-section         PEICONS1
-                incw    [rdi + icon_offset]
-section         PEICONS2
-                add     [rdi + icon_offset], IMM16(icon_delta)
 section         PETLSHAK
                 lea     rax, [rdi + tls_address]
                 push    [rax]   // save the TLS index
                 mov     [rax],  IMM32(tls_value) // restore compressed data overwritten by the TLS index
                 push    rax
 
-section         PEMAIN02
-                push    rdi
-section         PEMAIN03
-
-// =============
-// ============= DECOMPRESSION
-// =============
-
-.att_syntax
-section         NRV_HEAD
-/* Working registers */
-#define off  %eax  /* XXX: 2GB */
-#define len  %ecx  /* XXX: 2GB */
-#define lenq %rcx
-#define bits %ebx
-#define displ %ebp
-#define dispq %rbp
-
-        xor bits,bits  // empty; force refill
-        xor len,len  // create loop invariant
-        orq $(~0),dispq  // -1: initial displacement
-        call setup  // push &getbit [TUNED]
-ra_setup:
-
-#define jnextb0np jnextb0yp
-#define jnextb0yp GETBITp; jnc
-#define jnextb1np jnextb1yp
-#define jnextb1yp GETBITp; jc
-#define GETBITp \
-        addl bits,bits; jnz 0f; \
-        movl (%rsi),bits; subq $-4,%rsi; \
-        adcl bits,bits; movb (%rsi),%dl; \
-0:
-/* Same, but without prefetch (not useful for length of match.) */
-#define jnextb0n jnextb0y
-#define jnextb0y GETBIT; jnc
-#define jnextb1n jnextb1y
-#define jnextb1y GETBIT; jc
-#define GETBIT \
-        addl bits,bits; jnz 0f; \
-        movl (%rsi),bits; subq $-4,%rsi; \
-        adcl bits,bits; \
-0:
-
-/* rotate next bit into bottom bit of reg */
-#define getnextbp(reg) call *%r11; adcl reg,reg
-#define getnextb(reg)  getnextbp(reg)
-
-
-getbit:
-        addl bits,bits; jz refill  // Carry= next bit
-        rep; ret
-refill:
-        movl (%rsi),bits; subq $-4,%rsi  // next 32 bits; set Carry
-        adcl bits,bits  // LSB= 1 (CarryIn); CarryOut= next bit
-        movb (%rsi),%dl  // speculate: literal, or bottom 8 bits of offset
-        rep; ret
-
-copy:  // In: len, %rdi, dispq;  Out: 0==len, %rdi, dispq;  trashes %rax, %rdx
-        leaq (%rdi,dispq),%rax; cmpl $5,len  // <=3 is forced
-        movb (%rax),%dl; jbe copy1  // <=5 for better branch predict
-        cmpq $-4,dispq;   ja  copy1  // 4-byte chunks would overlap
-        subl $4,len  // adjust for termination cases
-copy4:
-        movl (%rax),%edx; addq $4,      %rax; subl $4,len
-        movl %edx,(%rdi); leaq  4(%rdi),%rdi; jnc copy4
-        addl $4,len; movb (%rax),%dl; jz copy0
-copy1:
-        incq %rax; movb %dl,(%rdi); subl $1,len
-                   movb (%rax),%dl
-        leaq 1(%rdi),%rdi;          jnz copy1
-copy0:
-        rep; ret
-
-setup:
-        cld
-        pop %r11  // addq $ getbit - ra_setup,%r11  # &getbit
-
-#define NO_METHOD_CHECK
-
-section         NRV2B
-#define eof eofb
-#include "arch/amd64/nrv2b_d.S"
-eofb:
-
-section         NRV2D
-#undef eof
-#define eof eofd
-#include "arch/amd64/nrv2d_d.S"
-eofd:
-
-section         NRV2E
-#undef eof
-#define eof eofe
-#include "arch/amd64/nrv2e_d.S"
-eofe:
-
-#undef eof
-#undef len
-.intel_syntax noprefix
-section         LZMA_HEAD
-                mov     eax, IMM32(lzma_u_len)
-                push    rax
-                mov     rcx, rsp
-                mov     rdx, rdi
-                mov     rdi, rsi
-                mov     esi, IMM32(lzma_c_len)
-
-.att_syntax
-#define NO_RED_ZONE
-#include "arch/amd64/regs.h"
-#include "arch/amd64/lzma_d.S"
-
-.intel_syntax noprefix
-section         LZMA_TAIL
-                leave
-                pop     rax
-// =============
-section         PEMAIN10
-                pop     rsi             // load vaddr
-
 section         PETLSHAK2               // restore the TLS index
                 pop     rdi
                 pop     rax
                 mov     [rdi], eax
-
-// =============
-// ============= FILTERS
-// =============
-
-section         PECTTPOS
-                lea     rdi, [rsi + filter_buffer_start]
-section         PECTTNUL
-                mov     rdi, rsi
-
-section         PEFILTER49
-                push    rsi
-                mov     rdi, rsi
-                mov     rsi, offset filter_length
-                mov     dl, IMM8(filter_cto)
-.att_syntax
-#include "arch/amd64/bxx.S"
-.intel_syntax noprefix
-                pop     rsi
 
 // =============
 // ============= IMPORTS
@@ -286,13 +100,13 @@ section PEIMPORT
                 xor     rax, rax
                 mov     ax, [rdi]
                 add     rdi, rax
-                sub     rsp, 0x20
 
+                sub     rsp, 0x28
                 lea     rcx, [rip + LoadLibraryA]
-                call    get_kernel32_proc
+                call    GetKernel32Proc
                 mov     r13, rax
                 lea     rcx, [rip + GetProcAddress]
-                call    get_kernel32_proc
+                call    GetKernel32Proc
                 mov     r14, rax
 next_dll:
                 mov     eax, [rdi]
@@ -358,10 +172,10 @@ section         PEIERDLL
                 ret
 
 section         PEIEREXE
-                add     rsp, 0x28
+                // no need to restore registers
                 //      rcx contains garbage -> garbage return code
                 lea     rcx, [rip + ExitProcess]
-                call    get_kernel32_proc
+                call    GetKernel32Proc
                 jmp     rax
 section         PEIMDONE
 imports_done:
@@ -482,10 +296,11 @@ section         PETLSC
 // ============= Cleanup
 
 section         PEMAIN20
-                pop     rbp
-                pop     rdi
-                pop     rsi
+                pop     r15
                 pop     rbx
+                pop     rsi
+                pop     rdi
+                pop     rbp
 
 // clear the dirty stack
 .macro          clearstack128  tmp_reg
@@ -517,6 +332,7 @@ section         PERETURN
                 pop     rax
                 ret
 section         PEDOJUMP
+                push rcx // 16 aligned when ret from xor decoder, mimic being called
                 jmp     original_entry
 
 // =============
@@ -552,88 +368,7 @@ done_callbacks:
                 pop     rsi
                 ret
 
-section         DATA1
-LoadLibraryA:
-        .asciz "LoadLibraryA"
-GetProcAddress:
-        .asciz "GetProcAddress"
-ExitProcess:
-        .asciz "ExitProcess"
-.global DATA1_END // keep in the symbol table
-DATA1_END:
-        .quad 0         // align for xor
-
-section         DATA2
-.global kernel32, VirtualProtect, kernel32BaseAddr, VirtualProtectAddr, DATA2_END
-kernel32:
-        .short 'k', 'e', 'r', 'n', 'e', 'l', '3', '2', '.', 'd', 'l', 'l', 0
-VirtualProtect:
-        .asciz "VirtualProtect"
-kernel32BaseAddr:
-        .quad 0
-VirtualProtectAddr:
-        .quad 0
-DATA2_END:
-        .quad 0         // align for xor
-
-section         GET_KERNEL32_PROC
-                // mimic mainCRTStartup
-                sub     rsp, 0x28
-                call    dummpy_func
-                add     rsp, 0x28
-                jmp     unprotect_bootstrap_start
-#
-# UNPROTECT START
-#
-        // jmp unprotect_bootstrap_end
-unprotect_bootstrap_start:
-        // initial protect value
-                sub     rcx, r8 // they are equal (need verify in all OS)
-                inc     ecx
-                xchg    esi, ecx
-                ror     esi, 26  // 0x40
-
-                mov     rdx, IMM64(xor_key_loader)
-                lea     rcx, [rip + data2]
-                lea     r8, [rcx + data2_len]
-                xor_data2_start:
-                mov     rax, [rcx]
-                xor     rax, rdx
-                mov     [rcx], rax
-                add     rcx, 8
-                cmp     rcx, r8
-                jb      xor_data2_start
-unprotect_bootstrap_end:
-                call    GetKernel32BaseAddr
-
-                lea     rcx, [rip + virtual_protect]
-                call    GetKernel32Proc
-                mov     [rip + virtual_protect_addr], rax
-
-
-                sub     rsp, 0x28
-
-                mov     r9, rsp
-                mov     r8d, esi                 // PAGE_EXECUTE_READWRITE
-                lea     rcx, [rip + data_section]                     // VirtualProtect
-                mov     rdx, IMM64(data_section_size)   // size
-                call    [rip + virtual_protect_addr]                     // VirtualProtect
-
-                mov     r9, rsp
-                mov     r8d, esi                 // PAGE_EXECUTE_READWRITE
-                lea     rcx, [rip + bss_section]                     // VirtualProtect
-                mov     rdx, IMM64(bss_section_size)                // size
-                call    [rip + virtual_protect_addr]                     // VirtualProtect
-
-                add     rsp, 0x28
-                lea     rax, [rip + upx_start]
-                sub     rax, rsi
-                jmp     rax
-#
-# UNPROTECT END
-#
-
-.global GetKernel32Proc
+section         WINAPI
 GetKernel32Proc:
 //; File d:\tmp\upx\src\stub\src\GetKernel32Proc.c
 //; Line 61
@@ -645,7 +380,7 @@ LN25:
 	mov	QWORD PTR [rax+32], rdi
 	push	r14
 //; Line 62
-	lea	r8, [rip + kernel32_base_addr]
+	lea	r8, [rip + kernel32BaseAddr]
 	mov	r8, [r8]
 	xor	edx, edx
 	mov	rbp, rcx
@@ -752,7 +487,7 @@ LN24_GetKernel3:
 //; Line 52
 	movsx	rax, r9b
 //; Line 53
-        lea	r9, [rip + kernel_32]
+        lea	r9, [rip + kernel32]
 	mov	WORD PTR [rsp+rax*2], r10w
 	lea	rax, QWORD PTR [rsp]
 	sub	r9, rax
@@ -779,14 +514,164 @@ LN22_GetKernel3:
 LN13_GetKernel3:
 //; Line 54
 	mov	rax, QWORD PTR [rdx+48]
-	lea	r8, [rip + kernel32_base_addr]
+	lea	r8, [rip + kernel32BaseAddr]
 	mov	[r8], rax
 LN3_GetKernel3:
 //; Line 59
 	add	rsp, 536				//; 00000218H
-dummpy_func:
-	ret	0
+        ret     0
 // GetKernel32BaseAddr ENDP
 // section         GET_KERNEL32_PROC
 
+LoadLibraryA:
+        .asciz "LoadLibraryA"
+GetProcAddress:
+        .asciz "GetProcAddress"
+ExitProcess:
+        .asciz "ExitProcess"
+VirtualProtect:
+        .asciz "VirtualProtect"
+kernel32:
+        .short 'k', 'e', 'r', 'n', 'e', 'l', '3', '2', '.', 'd', 'l', 'l', 0
+kernel32BaseAddr:
+        .quad 0
+VirtualProtectAddr:
+        .quad 0
+.global END
+END:
+        .quad 0         // align for xor
+
+section UPX_STUB
+        push rsi
+        push rbp
+        lea rbp, [rsp-0x38]
+        sub rsp, 0x58
+
+        lea rsi, [rip+coverup_call]
+        mov [rbp + 0x10], rbp # var0
+        mov rcx, [rsp + 0x30] # var0
+        mov [rbp + 8], rcx # copy to var1
+        dec rcx # cl: 0xXf
+        shl rcx, 2 # 0x3c/60
+        shl qword ptr [rbp + 8], cl # var1: 0
+        jne never_jmp
+                # add offset to LOADER_DECODER
+                # use [rbp] just for mimicing
+                push rsi
+                mov rsi, [rbp - 0x28] # copy to rsi
+                mov rcx, [rbp + 8] # var1: 0
+                mov rdx, rcx
+                dec dx # -1 0xffff
+                mov [rbp + 0x10], rdx # var2: 0
+                lea rax, [rcx + 1<<15]
+                        .reloc . - 4, R_X86_64_16, (1<<15) + loader_decoder_offset_from_coverup_low
+                add rsi, rdx
+                sub rsi, rax
+                lea rax, [rcx + 1<<15]
+                        .reloc . - 4, R_X86_64_16, (1<<15) + loader_decoder_offset_from_coverup_high
+                push rdx
+                push rcx
+                sub rdx, rax
+                inc rcx
+                shl rcx, 4 # 16
+                shl rdx, cl # << 16
+                add rsi, rdx
+                mov rbx, rsi
+                sub rbx, [rbp - 0x28] # loader_decoder_offset_from_coverup
+                mov [rbp - 0x28], rsi  # copy to rsi
+                pop rcx
+                pop rdx
+                pop rsi
+never_jmp:
+        call rsi
+        add rsp, 0x58
+        pop rbp
+        pop rsi
+        ret
+
+section LOADER_DECODER
+# deobfuscate the loader
+# rbx: loader_decoder_offset_from_coverup (1st ^ 2nd) byte as xor key
+# rcx: 0
+# rdx: 0xffff
+        push    rbp
+        push    rsi
+        push    rdi
+        push    rbx
+        lea     rbp, [rsp - 0x20]
+        push    rbp
+        sub     rsp, 0x28
+        lea     rax, [rcx + 1<<15]
+                .reloc . - 4, R_X86_64_16, (1<<15) + loader_size_addend1
+        lea     r8, [rcx + 1<<15]
+                .reloc . - 4, R_X86_64_16, (1<<15) + loader_size_addend2
+        add     r8, rax
+        push    r8 # size
+        lea     rsi, [rip + upx_start_complement]
+        sub     dx, si # camouflage the address, 0xffff - complement
+        xchg    dx, si
+        push    rsi # upx_start
+        pop     rdi # balance
+        mov     rdx, [rbp - 0x20] # upx_start
+        lea     rax, [rcx + 0x40]
+        mov     [rbp + rax], rdx # change return address
+
+        mov     r8, rcx
+        inc     r8 # r8: 1
+        mov     r10, r8
+        shl     r10, 5 # 0x20
+
+        or      rbx, rcx # obf
+        push    rbx # rbx: key
+        mov     rdi, rbx
+        or      rbx, rcx # obf
+        not     rdi     # rdi: ~key
+        push    rdi
+mov     r11, rcx # r11: counter
+        lea     rsi, [rip + do_xor]
+        push    rsi
+
+        do_xor:
+        mov     rbp, [rsp + 0x48] # restore rbp
+        mov     rax, [rbp - 0x30]
+        # mimic sub rsp, 0x28
+        push    rax # copy do_xor as return address
+        mov     rsi, [rbp + 0x40] # upx_start
+        push    rsi # align
+        mov     rdx, [rsi + r11]
+        push    rdx # align
+        # mimic xor (a&~b) | (~a&b)
+        # b = c^d
+        # ((a&~c) | (~a&c)) ^d
+        mov     r9, rdx
+        mov     rax, r9
+        not     rax
+        push    rax # align
+        mov     rbx, [rbp - 0x20] # key
+        and     rax, rbx
+        mul     r8b
+        and     r9, [rbp - 0x28] # ~key
+        push    r9  # align
+        or      r9, rcx # obf
+        or      rax, r9 # xor done
+        mov     r9, [rsp + 0x98] # upx_start
+        add     r9, r11
+        xor     al, bh
+        xchg    dl, al  # change only the byte
+        mov     [r9 + rcx], rdx # write back
+
+        mov     rax, [rbp - 0x18] # size
+        lea     r11, [r11 + r8] # add 1 to counter
+        cmpxchg r11, rcx # cmp to rax/size, r11=0 when done, otherwise r11==rax
+        mov     rax, r11
+        sub     rbp, rsp
+        add     rbp, r10
+        and     rdx, rcx # clear
+        cmpxchg rdx, rbp # rdx: rbp+0x40 when done otherwise 0
+        add     rsp, rdx
+        pop rbx
+        pop rdi
+        pop rsi
+        pop rbp
+        ret
 /* vim:set ts=8 sw=8 et: */

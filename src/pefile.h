@@ -26,15 +26,18 @@
  */
 
 #pragma once
+#pragma warning(disable: 5030) // unrecognized attribute '__declspec'
+#include <vector>
+#pragma warning(default: 5030)
 
 /*************************************************************************
 // general/pe handling
 **************************************************************************/
 
+class Camouflage;
+
 class PeFile : public Packer {
     typedef Packer super;
-public:
-    virtual int getVersion() const override { return 13; }
 protected:
     class Interval;
     class Reloc;
@@ -48,7 +51,7 @@ protected:
 
     void readSectionHeaders(unsigned objs, unsigned sizeof_ih);
     unsigned readSections(unsigned objs, unsigned usize, unsigned ih_filealign,
-                          unsigned ih_datasize);
+                          unsigned ih_datasize, unsigned extra);
     void checkHeaderValues(unsigned subsystem, unsigned mask, unsigned ih_entry,
                            unsigned ih_filealign);
     unsigned handleStripRelocs(upx_uint64_t ih_imagebase, upx_uint64_t default_imagebase,
@@ -160,7 +163,6 @@ protected:
 
     bool importbyordinal = false;
     bool kernel32ordinal = false;
-    unsigned rvamin;
     unsigned cimports; // rva of preprocessed imports
     unsigned crelocs;  // rva of preprocessed fixups
     int big_relocs;
@@ -198,7 +200,6 @@ protected:
 
     MemBuffer mb_isection;
     SPAN_0(pe_section_t) isection = nullptr;
-    pe_section_t osection[5];
     bool isdll = false;
     bool isrtm = false;
     bool isefi = false;
@@ -522,6 +523,16 @@ protected:
         void build(char *base, unsigned newoffs);
         unsigned getsize() const { return size; }
     };
+    std::vector<std::string> getCamouflageFiles(const char * folder);
+    virtual Camouflage* createCamouflage(){return 0;};
+
+public:
+    virtual int getVersion() const override { return 13; }
+    unsigned garbage_len;
+    unsigned loader_decoder_offset_in_garbage;
+    int loader_decoder_size;
+    unsigned rvamin;
+    pe_section_t osection[5];
 };
 
 class PeFile32 : public PeFile {
@@ -582,8 +593,12 @@ protected:
         ddirs_t ddirs[16];
     };
 
+    Camouflage* createCamouflage();
+public:
     pe_header_t ih, oh;
 };
+
+class Camouflage64;
 
 class PeFile64 : public PeFile {
     typedef PeFile super;
@@ -643,7 +658,68 @@ protected:
         ddirs_t ddirs[16];
     };
 
+    Camouflage* createCamouflage();
+public:
     pe_header_t ih, oh;
 };
 
+class Camouflage {
+public:
+    unsigned size;
+    unsigned coverup = 0;
+    virtual LE32 getEntry() = 0;
+    virtual MemBuffer& getInBuf() = 0;
+    virtual void postFix(PeFile *host) = 0;
+};
+
+class Camouflage32 : public PeFile32, public Camouflage {
+public:
+    Camouflage32() : PeFile32(&InputFile()){};
+    const char* camouflageFolder = "c:\\windows\\syswow64\\";
+    LE32 getEntry() { return ih.entry; };
+    MemBuffer& getInBuf() { return ibuf; };
+    void postFix(PeFile *host){};
+// dummy
+    int getFormat() const{return 0;};
+    const char *getName() const{return 0;};
+    const char *getFullName(const Options *) const{return 0;};
+    bool needForceOption() const{return 0;};
+    void defineSymbols(unsigned ncsection, unsigned upxsection, unsigned sizeof_oh, unsigned isize_isplit, unsigned s1addr){};
+    void setOhDataBase(const pe_section_t *osection){};
+    void setOhHeaderSize(const pe_section_t *osection){};
+    const int *getCompressionMethods(int,int) const{return 0;};
+    const int *getFilters(void) const{return 0;};
+    upx::tribool canPack(void){return 0;};
+    void pack(OutputFile *){};
+    void buildLoader(const Filter *){};
+    Linker *newLinker(void) const{return 0;};
+};
+
+class Camouflage64 : public PeFile64, public Camouflage {
+    int * call = 0;
+    int * __native_startup_lock = 0;
+    int * __native_startup_state = 0;
+public:
+    Camouflage64();
+    ~Camouflage64() noexcept {};
+    const char* camouflageFolder = "c:\\windows\\system32\\";
+    LE32 getEntry() { return ih.entry; };
+    MemBuffer& getInBuf() { return ibuf; };
+    void postFix(PeFile *host);
+
+// dummy
+    int getFormat() const{return 0;};
+    const char *getName() const{return 0;};
+    const char *getFullName(const Options *) const{return 0;};
+    bool needForceOption() const{return 0;};
+    void defineSymbols(unsigned ncsection, unsigned upxsection, unsigned sizeof_oh, unsigned isize_isplit, unsigned s1addr){};
+    void setOhDataBase(const pe_section_t *osection){};
+    void setOhHeaderSize(const pe_section_t *osection){};
+    const int *getCompressionMethods(int,int) const{return 0;};
+    const int *getFilters(void) const{return 0;};
+    upx::tribool canPack(void){return 0;};
+    void pack(OutputFile *){};
+    void buildLoader(const Filter *){};
+    Linker *newLinker(void) const{return 0;};
+};
 /* vim:set ts=4 sw=4 et: */
