@@ -95,7 +95,7 @@ unsigned UiPacker::update_fu_len = 0;
 // constants
 **************************************************************************/
 
-static const char header_line1[] = "        File size         Ratio      Format      Name\n";
+static const char header_line1[] = "        File size (payload)         Ratio      Format      Name\n";
 static const char header_line2[] = "   --------------------   ------   -----------   -----------\n";
 
 static const char progress_filler[4 + 1] = ".*[]";
@@ -136,17 +136,14 @@ static const char *mkline(upx_uint64_t fu_len, upx_uint64_t fc_len, upx_uint64_t
     // Large ratios can happen because of overlays that are
     // appended after a program is packed.
     unsigned ratio = get_ratio(fu_len, fc_len);
-    if (ratio >= 1000 * 1000)
-        strcpy(r, "overlay");
-    else
-        upx_safe_snprintf(r, sizeof(r), "%3u.%02u%%", ratio / 10000, (ratio % 10000) / 100);
+    upx_safe_snprintf(r, sizeof(r), "%3u.%02u%%", ratio / 10000, (ratio % 10000) / 100);
     if (decompress)
-        f = "%10lld <-%10lld  %7s %15s %s";
+        f = "%10llx <-%10llx  %7s %15s %s";
     else
-        f = "%10lld ->%10lld  %7s %15s %s";
+        f = "%10llx(%llx) ->%10llx %7s %15s %s";
     center_string(fn, sizeof(fn), format_name);
     assert(strlen(fn) == 15);
-    upx_safe_snprintf(buf, sizeof(buf), f, (long long) fu_len, (long long) fc_len, r, fn, filename);
+    upx_safe_snprintf(buf, sizeof(buf), f, (long long) fu_len, u_len, (long long) fc_len, r, fn, filename);
     UNUSED(u_len);
     UNUSED(c_len);
     return buf;

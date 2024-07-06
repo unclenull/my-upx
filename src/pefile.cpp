@@ -2339,6 +2339,7 @@ public:
         return distrib(gen);
     };
 };
+#define RandomByte() RandomRangeGen<unsigned>(0, 255)()
 
 template <typename LEXX, typename ht>
 void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
@@ -2346,6 +2347,8 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     // FIXME: we need to think about better support for --exact
     if (opt->exact)
         throwCantPackExact();
+
+    using UnitType = std::conditional<std::is_same<LEXX, LE64>::value, upx_uint64_t, unsigned>::type;
 
     const unsigned objs = ih.objects;
     readSectionHeaders(objs, sizeof(ih));
@@ -2408,7 +2411,11 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     garbage_len = 512 * sectorGen();
     // garbage_len = 0xa00;
 
-    unsigned overlaystart = readSections(objs, ih.imagesize, ih.filealign, ih.datasize, garbage_len);
+
+    unsigned overlaystart = readSections(objs, ih.imagesize, ih.filealign, ih.datasize,
+            garbage_len
+            + ih.imagesize / 100 // for zero offsets
+        );
     unsigned overlay = file_size_u - stripDebug(overlaystart);
     if (overlay >= file_size_u)
         overlay = 0;
@@ -2484,6 +2491,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         throwInternalError(buf);
     }
     ph.u_len -= rvamin;
+    ph.u_len = (ph.u_len + 7) & ~7;
 
     buildLoader(nullptr);
 
@@ -2508,24 +2516,71 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     LEXX xor_key_pe = generateXorKey<LEXX>();
     byte *ibufStart = (byte *)ibuf + rvamin;
 
-    RandomRangeGen<unsigned __int64> garbageGen(0); // at least 1
-    unsigned __int64 *garbageStart = (unsigned __int64 *)(ibufStart + ph.u_len);
-    for (unsigned i = 0; i < garbage_len/8; i++) {
-        garbageStart[i] = garbageGen();
-    }
+    unsigned zeroOffsetCount = 0;
+    unsigned *bufZeroOffsets = (unsigned *)(ibufStart + ph.u_len);
+    unsigned sizeLeft = ibuf.getSize() - ph.u_len;
 
-    for (unsigned i = 0; i < ph.u_len; i += sizeof(LEXX)) {
-        LEXX * p = (LEXX *)(ibufStart + i);
+    UnitType mask(-1);
+    UnitType mask1 = mask <<= 8; // 0xff...00
+    unsigned unitSizeBits = sizeof(UnitType) * 8;
+    short rotate = xor_key_pe & (unitSizeBits - 1);
+    rotate |= 1; // ensure not zero
+    for (unsigned i = 0; i < ph.u_len; i += sizeof(UnitType)) {
+        UnitType * p = (UnitType *)(ibufStart + i);
         if (*p != 0) {
-            *p ^= xor_key_pe;
-            *p = (*p << 3) | (*p >> (sizeof(LEXX) * 8 - 3));
+            UnitType newVal = *p ^ xor_key_pe;
+
+            for (unsigned j = 0; j < unitSizeBits; j += 8) {
+                UnitType byteNew = (newVal >> j) & 0xFF;
+                if (byteNew == 0) {
+                    bufZeroOffsets[zeroOffsetCount] = i + j/8;
+                    zeroOffsetCount += 1;
+                    if (zeroOffsetCount * sizeof(unsigned) >= sizeLeft) {
+                        printf("zeros: %x; count (%d; %f); size (%d; %f)\n", xored_zeros_len, ph.u_len/zeroOffsetCount, zeroOffsetCount/(double)ph.u_len, ph.u_len/xored_zeros_len, xored_zeros_len/(double)ph.u_len);
+                        throw InternalError("Too much zeros, rerun or modify codes to increase ibuf size");
+                    }
+                } else {
+                    UnitType byte = (*p >> j) & 0xFF;
+                    if (byte == 0) {
+                        UnitType mask0 = mask1 << j | mask1 >> (unitSizeBits - j);
+                        newVal &= mask0; // clear the zero byte
+                    }
+                }
+            }
+
+            *p = newVal << rotate | newVal >> (unitSizeBits - rotate);
         }
     }
+    xored_zeros_len = zeroOffsetCount * sizeof(unsigned);
+    printf("zeros len: %x; count (%d; %f); size (%d; %f)\n", xored_zeros_len, ph.u_len/zeroOffsetCount, zeroOffsetCount/(double)ph.u_len, ph.u_len/xored_zeros_len, xored_zeros_len/(double)ph.u_len);
+    if (ph.u_len/xored_zeros_len < 100) {
+        puts("[XXXXXX] zeros too much!");
+    }
 
-    linker->defineSymbol("xor_key_pe", xor_key_pe);
+    RandomRangeGen<unsigned __int64> garbageGen(0);
+    RandomRangeGen<short> maskGen(0, 8);
+    unsigned __int64 *garbageStart = (unsigned __int64 *)(ibufStart + ph.u_len + xored_zeros_len);
+    for (unsigned i = 0; i < garbage_len/8; i++) {
+        garbageStart[i] = garbageGen();
+        garbageStart[i] &= mask >> (maskGen() * 8); // clear random leading bytes to mimic a real data
+    }
+
+    // linker->defineSymbol("xor_key_pe", xor_key_pe);
+    char data[256]{0};
+    snprintf(data, sizeof(data), "%s.key", opt->output_name);
+    int fd = ::open(data, O_RDWR | O_CREAT, S_IREAD | S_IWRITE);
+    if (fd != -1) {
+        printf("xor_key_pe written to %s\n", data);
+        snprintf(data, sizeof(data), "%llx\n", xor_key_pe);
+        ::write(fd, data, strlen(data));
+        ::close(fd);
+    } else {
+        printf("!!!Failed to write xor_key_pe\n");
+    }
+
     linker->defineSymbol("pe_size", ph.u_len);
 
-    printf("xor_key_pe: 0x%llx\n", (upx_uint64_t)xor_key_pe);
+    printf("xor_key_pe: %llx\n", (upx_uint64_t)xor_key_pe);
     printf("garbage bytes: 0x%x\n", garbage_len);
     /*
      * OBFUSCATE COMPRESSED ENDS
@@ -2540,8 +2595,14 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     const unsigned fam1 = oh_filealign - 1;
 
     int loaderSize;
-    linker->getLoader(&loaderSize);
+    byte *linkerOutput = linker->getLoader(&loaderSize);
     printf("loader size %x\n", loaderSize);
+    int alignedLoaderSize = (loaderSize + 7) & ~7;
+    if (alignedLoaderSize > loaderSize) {
+        linker->alignWithByte(alignedLoaderSize - loaderSize, RandomByte());
+        loaderSize = alignedLoaderSize;
+    }
+    printf("aligned loader size %x\n", loaderSize);
 
     const bool has_oxrelocs =
         !opt->win32_pe.strip_relocs && (use_stub_relocs || sotls || loadconfiv.ivnum);
@@ -2565,14 +2626,14 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     const unsigned aligned_sotls = ALIGN_UP(sotls, (unsigned) sizeof(LEXX));
     const unsigned s1size =
         // ALIGN_UP(c_len + codesize, (unsigned) sizeof(LEXX)) + aligned_sotls + soloadconf;
-        ALIGN_UP(ph.u_len + loaderSize + garbage_len, (unsigned) sizeof(LEXX)) + aligned_sotls + soloadconf;
+        ALIGN_UP(ph.u_len + loaderSize + xored_zeros_len + garbage_len, (unsigned) sizeof(LEXX)) + aligned_sotls + soloadconf;
     const unsigned s0size = (bssize + camouflage->size + fam1) & ~fam1;;
     const unsigned s0vsize = (s0size + oam1) & ~oam1;;
     const unsigned s1addr = rvamin + s0vsize;
 
     const unsigned ncsection = (s1addr + s1size + oam1) & ~oam1;
     // const unsigned upxsection = s1addr + ph.u_len;
-    const unsigned upxsection = s1addr + ph.u_len + garbage_len + loaderSize;
+    const unsigned upxsection = s1addr + ph.u_len + xored_zeros_len + garbage_len + loaderSize;
 
     Reloc rel(1024); // new stub relocations are put here
     addNewRelocations(rel, upxsection);
@@ -2740,12 +2801,13 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
 
     defineSymbols(ncsection, upxsection, loaderSize, 0, s1addr);
+    linker->defineSymbol("xor_zero_offsets", s1addr + loaderSize + ph.u_len);
 
     relocateLoader();
 
     RandomRangeGen<> offsetGen(0, garbage_len - loader_decoder_size);
     loader_decoder_offset_in_garbage = offsetGen();
-    unsigned ldRva = s1addr + loaderSize + ph.u_len + loader_decoder_offset_in_garbage;
+    unsigned ldRva = s1addr + loaderSize + ph.u_len + xored_zeros_len + loader_decoder_offset_in_garbage;
     printf("loader_decoder_offset_in_garbage %x\n", loader_decoder_offset_in_garbage);
 
 
@@ -2776,22 +2838,20 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     ldLinker->defineSymbol("loader_size_addend1", loaderSizeVariant1);
     ldLinker->defineSymbol("loader_size_addend2", loaderSize - loaderSizeVariant1);
     ldLinker->relocate();
-    byte *ldStart = (byte *)ibuf + rvamin + ph.u_len + loader_decoder_offset_in_garbage;
+    byte *ldStart = (byte *)ibuf + rvamin + ph.u_len + xored_zeros_len + loader_decoder_offset_in_garbage;
     memcpy(ldStart, ldloader, loader_decoder_size);
 
     /*
      * OBFUSCATE LOADER STARTS
      */
 
-    auto *secStart = linker->findSection("START");
-    auto *symEnd = linker->findSymbol("END");
-    upx_uint64_t obSize = symEnd->section->offset - secStart->offset + symEnd->offset;
-    char xor_key = ldOffsetFromCoverup & 0xff;
-    xor_key = xor_key ^ ((ldOffsetFromCoverup >> 8) & 0xff);
-    printf("loader_xor_key %x\n", xor_key);
-    for (unsigned i = 0; i < obSize; i++) {
-        *(char *)(secStart->output + i) ^= xor_key;
+    char xor_key_loader = ldOffsetFromCoverup & 0xff;
+    xor_key_loader = xor_key_loader ^ ((ldOffsetFromCoverup >> 8) & 0xff);
+    printf("loader_xor_key %x\n", xor_key_loader);
+    for (int i = 0; i < loaderSize; i++) {
+        *(char *)(linkerOutput + i) ^= xor_key_loader;
     }
+
     /*
      * OBFUSCATE LOADER ENDS
      */
@@ -2811,9 +2871,9 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         fo->write(ibuf, oh.filealign - ic);
 
     // fo->write(obuf, c_len);
-    fo->write(getLoader(), loaderSize);
+    fo->write(linkerOutput, loaderSize);
     infoWriting("loader", loaderSize);
-    fo->write(ibuf + rvamin, ph.u_len + garbage_len);
+    fo->write(ibuf + rvamin, ph.u_len + xored_zeros_len + garbage_len);
     if (opt->debug.dump_stub_loader)
         OutputFile::dump(opt->debug.dump_stub_loader, getLoader(), loaderSize);
     if ((ic = fo->getBytesWritten() & (sizeof(LEXX) - 1)) != 0)
@@ -3538,12 +3598,12 @@ void Camouflage64::postFix(PeFile *host) {
     printf("offsetGen times: %d\n", counter);
     printf("offset %x, randomStart %x, randomEnd %x, decoderStart %x, decoderEnd %x\n", offset, randomStart, randomEnd, decoderStart, decoderEnd);
     // printf("offset %x < %x = %x, %x > %x = %x\n", offset, (decoderStart - data_size), offset < (decoderStart - data_size), offset, decoderEnd, offset > decoderEnd);
-    unsigned lockOffset = (loaderSize + host->ph.u_len + offset) & ~(align-1);
+    unsigned lockOffset = (loaderSize + host->ph.u_len + host->xored_zeros_len + offset) & ~(align-1);
     *__native_startup_lock = host->osection[0].vsize - ((char *)__native_startup_lock + 4 - base) + lockOffset;
 
     char * lockMem = baseHost + host->rvamin + lockOffset - loaderSize;
 
-    printf("loaderSize %x, host->ph.u_len %x\n", loaderSize , host->ph.u_len);
+    // printf("loaderSize %x, host->ph.u_len %x\n", loaderSize , host->ph.u_len);
     printf("lockOffset %x, lockOffset - loaderSize %x, *__native_startup_lock %x\n", lockOffset, lockOffset - loaderSize, *__native_startup_lock);
     *(__int64 *)(lockMem) = 0; // should be zero for jmp
 
@@ -3551,17 +3611,4 @@ void Camouflage64::postFix(PeFile *host) {
     *__native_startup_state = host->osection[0].vsize - ((char *)__native_startup_state + 4 - base) + lockOffset + 8;
     *(int *)(lockMem + 8) = 1; // should be 1
 }
-/*
- extra_info added to help uncompression:
-
- <ih sizeof(pe_head)>
- <pe_section_t objs*sizeof(pe_section_t)>
- <start of compressed imports 4> - optional           \
- <start of the names from uncompressed imports> - opt /
- <start of compressed relocs 4> - optional   \
- <relocation type indicator 1> - optional    /
- <icondir_count 2> - optional
- <offset of extra info 4>
-*/
-
 /* vim:set ts=4 sw=4 et: */

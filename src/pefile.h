@@ -529,6 +529,7 @@ protected:
 public:
     virtual int getVersion() const override { return 13; }
     unsigned garbage_len;
+    unsigned xored_zeros_len;
     unsigned loader_decoder_offset_in_garbage;
     int loader_decoder_size;
     unsigned rvamin;

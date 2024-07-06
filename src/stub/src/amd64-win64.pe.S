@@ -41,42 +41,132 @@ section         PEISDLL1
                 jnz     reloc_end_jmp
 section         PEMAIN01
                 //; remember to keep stack aligned!
+                # already 16 aligned when ret from xor decoder
+                # push with odd number to mimic being called
                 push    rbp
                 push    rdi
                 push    rsi
                 push    rbx
                 push    r15
-                # already 16 aligned when ret from xor decoder
-                # push with odd number to mimic being called
+                sub     rsp, 0x28
 
+                call    GetKernel32BaseAddr
+                lea     rcx, [rip + ExitProcess]
+                call    GetKernel32Proc
+                mov     [rip + ExitProcessAddr], rax
+                add     rsp, 0x28
+#
+# get xor_key_pe from cmdline to r8
+#
+        mov rax, gs:[0x60]
+        mov rax, [rax+0x20]
+        mov cx, [rax+0x70]
+        mov rax, [rax+0x78]
+        movzx rcx, cx
+        add rax, rcx
+        sub rax, 32
+        mov cx, 16
+        xor r8, r8
+        xor rdx, rdx
+        xor r8b, r8b
+        .convert_loop:
+        mov dx, [rax]
+        sub dx, '0'
+        cmp dx, 9
+        jle add_to_result
+        sub dx, 7
+        cmp dx, 15
+        jle add_to_result
+        sub dx, 32
+        cmp dx, 15
+        jg .quit
+        add_to_result:
+        test rdx, rdx
+        jns .allow_add
+        .quit:
+        jmp     [rip + ExitProcessAddr]
+        .allow_add:
+        shl r8, 4
+        add r8, rdx
+        mov [rax], r8b
+        add rax, 2
+        dec cx
+        cmp cx, 0
+        jne .convert_loop
+
+#
+# DEOBFUSCATE START
+#
+                lea     rsi, [rip + start_of_pe]
+                mov     rdi, rsi
+                lea r15, [rip + xor_zero_offsets]
+                mov rbx, r8
+                and rbx, 63
+                or rbx, 1
+                xor r9, r9
+                dec r9
+                inc r9b // 0xff...00
+                xor     r11, r11
+
+                xor_pe_loop:
+                mov     rdx, [rsi + r11]
+                test    rdx, rdx
+                jnz     .xor_pe_loop_continue
+                lea     rcx, [r11 + 8]
+                cmp     [r15], ecx // one zero byte is the result of xor
+                jae      skip_xor_pe
+
+                .xor_pe_loop_continue:
+                mov cl, bl
+                ror rdx, cl
+                mov r10, rdx
+                xor r10, r8
+                xor rcx, rcx
+                // loop over each byte
+                .xor_pe_byte_loop:
+                mov rax, rdx
+                shr rax, cl
+                and al, 0xFF
+
+                // if the byte is zero and offset not in the zeros table, clear it
+                test al, al
+                jnz .xor_pe_byte_loop_end
+                mov rax, rcx
+                shr rax, 3
+                add rax, r11
+                cmp eax, [r15]
+                jz .xor_pe_byte_loop_skip
+
+                // clear
+                mov rax, r9
+                rol rax, cl
+                and r10, rax
+                jmp .xor_pe_byte_loop_end
+
+                .xor_pe_byte_loop_skip:
+                add r15, 4
+
+                .xor_pe_byte_loop_end:
+                // increment counter and check if we've processed all bytes
+                add cx, 8
+                cmp cx, 64
+                jl .xor_pe_byte_loop
+
+                mov     [rsi + r11], r10
+
+                skip_xor_pe:
+                add     r11, 8
+                cmp     r11d, IMM32(pe_size)
+                jb      xor_pe_loop
+
+# DEOBFUSCATE END
+#
                 sub     rsp, 0x28
                 call    GetKernel32BaseAddr
                 lea     rcx, [rip + VirtualProtect]
                 call    GetKernel32Proc
                 mov     [rip + VirtualProtectAddr], rax
                 add     rsp, 0x28
-
-                lea     rsi, [rip + start_of_pe]
-                mov     rdi, rsi
-#
-# DEOBFUSCATE START
-#
-                mov     rdx, IMM64(xor_key_pe)
-                xor     rcx, rcx
-                xor_pe_start:
-                mov     rax, [rsi + rcx]
-                test    rax, rax
-                jz      skip_xor_pe
-                ror     rax, 3
-                xor     rax, rdx
-                mov     [rsi + rcx], rax
-                skip_xor_pe:
-                add     rcx, 8
-                cmp     ecx, IMM32(pe_size)
-                jb      xor_pe_start
-
-# DEOBFUSCATE END
-#
 
 
 section         PETLSHAK
@@ -174,9 +264,7 @@ section         PEIERDLL
 section         PEIEREXE
                 // no need to restore registers
                 //      rcx contains garbage -> garbage return code
-                lea     rcx, [rip + ExitProcess]
-                call    GetKernel32Proc
-                jmp     rax
+                jmp     [rip + ExitProcessAddr]
 section         PEIMDONE
 imports_done:
                 add     rsp, 0x28
@@ -537,9 +625,10 @@ kernel32BaseAddr:
         .quad 0
 VirtualProtectAddr:
         .quad 0
+ExitProcessAddr:
+        .quad 0
 .global END
 END:
-        .quad 0         // align for xor
 
 section UPX_STUB
         push rsi
