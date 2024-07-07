@@ -2580,7 +2580,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
     linker->defineSymbol("pe_size", ph.u_len);
 
-    printf("xor_key_pe: %llx\n", (upx_uint64_t)xor_key_pe);
+    printf("xor_key_pe: %016llx\n", (upx_uint64_t)xor_key_pe);
     printf("garbage bytes: 0x%x\n", garbage_len);
     /*
      * OBFUSCATE COMPRESSED ENDS
@@ -2597,7 +2597,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     int loaderSize;
     byte *linkerOutput = linker->getLoader(&loaderSize);
     printf("loader size %x\n", loaderSize);
-    int alignedLoaderSize = (loaderSize + 7) & ~7;
+    int alignedLoaderSize = (loaderSize + 15) & ~15; // important otherwise break movdqa
     if (alignedLoaderSize > loaderSize) {
         linker->alignWithByte(alignedLoaderSize - loaderSize, RandomByte());
         loaderSize = alignedLoaderSize;
