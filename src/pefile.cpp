@@ -2531,10 +2531,12 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     int codesize;
     linker->getLoader(&codesize);
 
-    const bool has_oxrelocs =
-        !opt->win32_pe.strip_relocs && (use_stub_relocs || sotls || loadconfiv.ivnum);
-    const bool has_ncsection = has_oxrelocs || soimpdlls || soexport || soresources;
-    const unsigned oobjs = last_section_rsrc_only ? 5 : has_ncsection ? 4 : 3;
+    // const bool has_oxrelocs =
+    //     !opt->win32_pe.strip_relocs && (use_stub_relocs || sotls || loadconfiv.ivnum);
+    const bool has_oxrelocs = !opt->win32_pe.strip_relocs && (use_stub_relocs || sotls);
+    // const bool has_ncsection = has_oxrelocs || soimpdlls || soexport || soresources;
+    const bool has_ncsection = has_oxrelocs || soexport;
+    const unsigned oobjs = last_section_rsrc_only ? 4 : has_ncsection ? 3 : 2;
     ////pe_section_t osection[oobjs];
     memset(osection, 0, sizeof(osection));
     // section 0 : bss
@@ -2647,20 +2649,16 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     // too idiot to use the data directories... M$ suxx 4 ever!
     // ... even worse: exploder.exe in NiceTry also depends on this to
     // locate version info
-    int bssIndex = 2;
     if (has_ncsection) {
         strcpy(osection[2].name, !last_section_rsrc_only && soresources ? ".rsrc" : ".rdata");
         osection[2].size = (ncsize + fam1) & ~fam1;
         osection[2].vaddr = ncsection;
         osection[2].vsize = ncvsize;
         osection[2].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ;
-        bssIndex = 3;
     }
-    strcpy(osection[bssIndex].name, ".bss");
 
     osection[0].size = s0size;
     osection[1].size = (s1size + fam1) & ~fam1;
-    osection[bssIndex].size = 0;
 
     osection[0].vaddr = rvamin;
     osection[1].vaddr = s1addr;
@@ -2668,15 +2666,14 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     osection[0].vsize = s0vsize;
     if (!last_section_rsrc_only) {
         osection[1].vsize = (osection[1].size + oam1) & ~oam1;
-        osection[bssIndex].vsize = ph.u_len;
-        osection[bssIndex].vaddr = osection[bssIndex-1].vaddr + osection[bssIndex-1].vsize;
-        oh.imagesize = osection[bssIndex].vaddr + osection[bssIndex].vsize;
         osection[0].rawdataptr = (pe_offset + sizeof(ht) + sizeof_osection + fam1) & ~(size_t) fam1;
         osection[1].rawdataptr = osection[0].rawdataptr + osection[0].size;
-        if (ncsection) {
+        int lastSec = 1;
+        if (has_ncsection) {
             osection[2].rawdataptr = osection[1].rawdataptr + osection[1].size;
+            lastSec = 2;
         }
-        osection[bssIndex].rawdataptr = osection[bssIndex-1].rawdataptr + osection[bssIndex-1].size;
+        oh.imagesize = osection[lastSec].vaddr + osection[lastSec].vsize;
     } else {
         osection[2].vsize = osection[2].size;
         osection[3].vsize = osection[3].size;
@@ -2686,7 +2683,6 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
     osection[0].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE;
     osection[1].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
-    osection[bssIndex].flags = IMAGE_SCN_CNT_UNINITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
 
     if (last_section_rsrc_only) {
         strcpy(osection[4].name, ".rsrc");
@@ -2717,8 +2713,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         linker->defineSymbol("exc_size", IDSIZE(PEDIR_EXCEPTION));
     }
 
-    // oh.bsssize = osection[3].vsize;
-    oh.datasize = osection[2].vsize + (oobjs > 3 ? osection[4].vsize : 0);
+    oh.datasize = osection[1].vsize + (has_ncsection ? osection[2].vsize : 0);
     setOhDataBase(osection);
     oh.codesize = osection[0].vsize;
     oh.codebase = osection[0].vaddr;
@@ -2732,7 +2727,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         oh.flags |= IMAGE_FILE_RELOCS_STRIPPED;
 
 
-    defineSymbols(ncsection, upxsection, osection[bssIndex].vaddr, 0, s1addr);
+    defineSymbols(ncsection, upxsection, 0, 0, s1addr);
     defineFilterSymbols(&ft);
 
     LEXX xor_key_loader = generateXorKey<LEXX>();
@@ -2747,8 +2742,6 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     bsLinker->defineSymbol("upx_start", upxsection + 0x40); // 0x40 for obfuscation
     bsLinker->defineSymbol("data_section", osection[1].vaddr);
     bsLinker->defineSymbol("data_section_size", osection[1].vsize);
-    bsLinker->defineSymbol("bss_section", osection[bssIndex].vaddr);
-    bsLinker->defineSymbol("bss_section_size", osection[bssIndex].vsize);
     auto *symDATA2 = linker->findSymbol("DATA2");
     bsLinker->defineSymbol("data2", symDATA2->section->offset + symDATA2->offset);
     auto *symDATA2_END = linker->findSymbol("DATA2_END");

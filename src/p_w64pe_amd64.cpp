@@ -163,7 +163,8 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
                                    unsigned ic, unsigned s1addr) {
     const unsigned myimport = ncsection + soresources - rvamin;
     // patch loader
-    linker->defineSymbol("original_entry", ih.entry + (uncompressedSection - rvamin));
+    // linker->defineSymbol("original_entry", ih.entry + (uncompressedSection - rvamin));
+    linker->defineSymbol("original_entry", ih.entry - rvamin);
     // if (use_dep_hack) {
     //     // This works around a "protection" introduced in MSVCRT80, which
     //     // works like this:
@@ -223,7 +224,8 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
     linker->defineSymbol("icon_offset", ncsection + icondir_offset - rvamin);
 
     const unsigned esi0 = s1addr + ic;
-    linker->defineSymbol("start_of_uncompressed", uncompressedSection);
+    // linker->defineSymbol("start_of_uncompressed", uncompressedSection);
+    linker->defineSymbol("uncompressed_size", ph.u_len);
     linker->defineSymbol("start_of_compressed", esi0);
 
     if (use_tls_callbacks) {

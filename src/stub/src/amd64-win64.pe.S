@@ -95,14 +95,26 @@ section         PEISDLL1
                 cmp     dl, 1
                 jnz     reloc_end_jmp
 section         PEMAIN01
-                //; remember to keep stack aligned!
-                lea     rsi, [rip + start_of_compressed]
-                lea     rdi, [rip + start_of_uncompressed]
                 push    rbp
                 push    rdi
                 push    rsi
                 push    rbx
                 push    r15
+                //; remember to keep stack aligned!
+                lea     rsi, [rip + start_of_compressed]
+                lea     rcx, [rip + VirtualAlloc]
+                call    get_kernel32_proc
+
+                xor     rcx, rcx
+                mov     rdx, IMM64(uncompressed_size)
+                mov     r8, 0x1000
+                mov     r9, 0x40
+                call    rax
+                mov     rdi, rax // start_of_uncompressed
+                # mov     rax, 15
+                # add     rdi, rax
+                # not     rax
+                # and     rdi, rax // align  to 16
 
 #
 # DEOBFUSCATE START
@@ -286,7 +298,7 @@ section PEIMPORT
                 xor     rax, rax
                 mov     ax, [rdi]
                 add     rdi, rax
-                sub     rsp, 0x20
+                sub     rsp, 0x20 // 'push r15' already balanced
 
                 lea     rcx, [rip + LoadLibraryA]
                 call    get_kernel32_proc
@@ -482,10 +494,14 @@ section         PETLSC
 // ============= Cleanup
 
 section         PEMAIN20
+                mov     r9, rsi // uncompressed start
+                pop     r15
                 pop     rbp
                 pop     rdi
                 pop     rsi
                 pop     rbx
+
+                push    rcx // align stack
 
 // clear the dirty stack
 .macro          clearstack128  tmp_reg
@@ -517,7 +533,10 @@ section         PERETURN
                 pop     rax
                 ret
 section         PEDOJUMP
-                jmp     original_entry
+                xor     rcx, rcx
+                mov     ecx, IMM32(original_entry)
+                add     r9, rcx
+                jmp     r9
 
 // =============
 // ============= TLS callback support part 2
@@ -553,6 +572,8 @@ done_callbacks:
                 ret
 
 section         DATA1
+VirtualAlloc:
+        .asciz "VirtualAlloc"
 LoadLibraryA:
         .asciz "LoadLibraryA"
 GetProcAddress:
@@ -621,9 +642,6 @@ unprotect_bootstrap_end:
 
                 mov     r9, rsp
                 mov     r8d, esi                 // PAGE_EXECUTE_READWRITE
-                lea     rcx, [rip + bss_section]                     // VirtualProtect
-                mov     rdx, IMM64(bss_section_size)                // size
-                call    [rip + virtual_protect_addr]                     // VirtualProtect
 
                 add     rsp, 0x28
                 lea     rax, [rip + upx_start]
