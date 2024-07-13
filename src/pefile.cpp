@@ -2501,6 +2501,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     bsLinker->addLoader("UPX_STUB");
     int bssize;
     byte *bsloader = bsLinker->getLoader(&bssize);
+    printf("bootstrap size %x\n", bssize);
 
     Linker *ldLinker = newLinker();
     ldLinker->init(stub_amd64_win64_pe, sizeof(stub_amd64_win64_pe));
