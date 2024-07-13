@@ -3491,9 +3491,7 @@ Camouflage64::Camouflage64() : PeFile64(&InputFile()) {
     fi->readx(ibuf, size);
 
     char *base = (char *)ibuf.getVoidPtr();
-    __int64 *p64 = (__int64 *) (base + size);
-    while(*(--p64) == 0) {} // drop trailing qword of zeros;
-    size = (char *)p64 - base + 8;
+    size = isection[0].vsize;
 
     // patch
     char *entry = base + ih.entry - ih.codebase;
