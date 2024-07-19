@@ -14,10 +14,11 @@
     ```
 
 ## improvements
-- xor
+- xor loader & compressed
 - size randomized
 - import dll names compressed
 - stripped resouce icon, version
+- clear resource, execption directory table, set at runtime
 - stripped timestamp, rich, other versions
 
 - false upx header

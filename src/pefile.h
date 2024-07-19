@@ -120,6 +120,8 @@ protected:
     SPAN_0(byte) oexport = nullptr;
     unsigned soexport;
 
+    void cleanseResources(const unsigned objs, Resource *res);
+
     void processResources(Resource *);
     void processResources(Resource *, unsigned);
     void rebuildResources(SPAN_S(byte) &, unsigned);
@@ -435,6 +437,7 @@ protected:
     };
 
     class Resource final : private noncopyable {
+        public:
         struct res_dir_entry;
         struct res_dir;
         struct res_data;
@@ -463,13 +466,10 @@ protected:
 
         void ibufcheck(const void *m, unsigned size);
 
-    public:
         explicit Resource(const byte *ibufstart, const byte *ibufen);
         explicit Resource(const byte *p, const byte *ibufstart, const byte *ibufend);
         ~Resource() noexcept;
         void init(const byte *);
-
-        void cleanse(MemBuffer &ibuf, const char *resBuf);
 
         unsigned dirsize() const;
         bool next();

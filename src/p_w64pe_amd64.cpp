@@ -193,7 +193,7 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
     //     linker->defineSymbol("vp_base", addr & ~0xfff);                      // page mask
     //     // linker->defineSymbol("VirtualProtect", ilinkerGetAddress("kernel32.dll", "VirtualProtect"));
     // }
-    linker->defineSymbol("vp_base", 0);
+    linker->defineSymbol("vp_base", 0); // relocated to image base + offset 0
     linker->defineSymbol("vp_size", osection[0].vaddr);
 
     linker->defineSymbol("start_of_relocs", crelocs);

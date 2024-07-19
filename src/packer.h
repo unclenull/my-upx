@@ -238,6 +238,9 @@ protected:
     void checkPatch(void *b, int blen, int boff, int size);
 
     // relocation util
+    static unsigned optimizeRelocEx(unsigned *relocnumList, LE32 **relocsList, SPAN_S(byte) out,
+                                  SPAN_P(byte) image, unsigned image_size, int bits, bool bswap,
+                                  int *big);
     static unsigned optimizeReloc(unsigned relocnum, SPAN_P(byte) relocs, SPAN_S(byte) out,
                                   SPAN_P(byte) image, unsigned image_size, int bits, bool bswap,
                                   int *big);

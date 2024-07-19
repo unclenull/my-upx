@@ -613,7 +613,7 @@ void PeFile64::processRelocs() // pass1
     }
 
     for (unsigned ic = 0; ic < 16; ic++)
-        if (ic != IMAGE_REL_BASED_DIR64 && counts[ic])
+        if (ic != IMAGE_REL_BASED_HIGHLOW && ic != IMAGE_REL_BASED_DIR64 && counts[ic])
             infoWarning("skipping unsupported relocation type %d (%d)", ic, counts[ic]);
 
     LE32 *fix[16];
@@ -650,6 +650,13 @@ void PeFile64::processRelocs() // pass1
         xcounts[ic] = jc;
     }
 
+    // preprocess "type 3" relocation records
+    for (unsigned ic = 0; ic < xcounts[IMAGE_REL_BASED_HIGHLOW]; ic++) {
+        pos = fix[IMAGE_REL_BASED_HIGHLOW][ic] + rvamin;
+        upx_uint32_t w = get_le32(ibuf.subref("bad reloc 3 %#x", pos, sizeof(LE32)));
+        set_le32(ibuf + pos, w - rvamin);
+    }
+
     // preprocess "type 10" relocation records
     for (unsigned ic = 0; ic < xcounts[IMAGE_REL_BASED_DIR64]; ic++) {
         pos = fix[IMAGE_REL_BASED_DIR64][ic] + rvamin;
@@ -660,8 +667,7 @@ void PeFile64::processRelocs() // pass1
     ibuf.fill(IDADDR(PEDIR_BASERELOC), IDSIZE(PEDIR_BASERELOC), FILLVAL);
     mb_orelocs.alloc(mem_size(4, relocnum, 8192)); // 8192 - safety
     orelocs = mb_orelocs;                          // => orelocs now is a SPAN_S
-    sorelocs = optimizeReloc(xcounts[IMAGE_REL_BASED_DIR64], (byte *) fix[IMAGE_REL_BASED_DIR64],
-                             orelocs, ibuf + rvamin, ibufgood - rvamin, 64, true, &big_relocs);
+    sorelocs = optimizeRelocEx(xcounts, fix, orelocs, ibuf + rvamin, ibufgood - rvamin, 64, true, &big_relocs);
 
     info("Relocations: original size: %u bytes, preprocessed size: %u bytes",
          (unsigned) IDSIZE(PEDIR_BASERELOC), sorelocs);
@@ -1679,34 +1685,71 @@ void PeFile::Resource::ibufcheck(const void *m, unsigned siz) {
 /*
  * Drop version, icon
  */
-void PeFile::Resource::cleanse(MemBuffer &ibuf, const char *resBuf) {
-    const res_dir *rnode = ACC_STATIC_CAST(const res_dir *, (const void *)resBuf);
-    ibufcheck(rnode, sizeof(*rnode));
+void PeFile::cleanseResources(const unsigned objs, Resource *res) {
+    soresources = 0; // Clear from host image
+    if ((IDSIZE(PEDIR_RESOURCE)) == 0)
+        return;
+    unsigned raddr = IDADDR(PEDIR_RESOURCE);
+    byte *resBuf = ibuf.subref("bad res %#x", raddr, 1);
+
+    const Resource::res_dir *rnode = ACC_STATIC_CAST(const Resource::res_dir *, (const void *)resBuf);
+    res->ibufcheck(rnode, sizeof(*rnode));
     int ic = rnode->identr + rnode->namedentr;
     if (ic == 0)
         return;
 
-    for (const res_dir_entry *rde = rnode->entries + ic - 1; --ic >= 0; rde--) { // type
-        if (!(rde->tnl == RT_VERSION || rde->tnl == RT_GROUP_ICON || rde->tnl == RT_ICON || rde->tnl == RT_ANIICON)) continue;
-        const res_dir *node2 = ACC_STATIC_CAST(const res_dir *, (const void *)(resBuf + (rde->child & 0x7fffffff)));
-        ibufcheck(node2, sizeof(*node2));
+    // Relocate these resources since the uncompressed address is dynamic.
+    unsigned char *addrReloc;
+    if (IDADDR(PEDIR_BASERELOC) == 0) { // take the sparing space of the last section
+        auto lastSec = isection[objs - 1];
+        addrReloc = ibuf.subref("no space for reloc %#x", lastSec.vaddr + lastSec.vsize, 0x10);
+        assert(lastSec.size - lastSec.vsize > 0x10); // ensure there is enough space TODO: more robust
+    } else {
+        auto lastSec = isection[objs - 1];
+        assert(IDADDR(PEDIR_BASERELOC) == lastSec.vaddr); // Assume reloc is the last section
+        assert(lastSec.size - IDSIZE(PEDIR_BASERELOC) > 0x10); // ensure there is enough space
+
+        addrReloc = ibuf.subref("no space for reloc %#x", IDADDR(PEDIR_BASERELOC) + IDSIZE(PEDIR_BASERELOC), 0x10);
+    }
+    set_le32(addrReloc, raddr);
+
+    unsigned count = 0;
+
+    for (const Resource::res_dir_entry *rde = rnode->entries + ic - 1; --ic >= 0; rde--) { // type
+        const Resource::res_dir *node2 = ACC_STATIC_CAST(const Resource::res_dir *, (const void *)(resBuf + (rde->child & 0x7fffffff)));
+        res->ibufcheck(node2, sizeof(*node2));
         int ic2 = node2->identr + node2->namedentr;
         if (ic2 == 0) continue;
-        for (const res_dir_entry *rde2 = node2->entries + ic2 - 1; --ic2 >= 0; rde2--) { // id
-            const res_dir *node3 = ACC_STATIC_CAST(const res_dir *, (const void *)(resBuf + (rde2->child & 0x7fffffff)));
-            ibufcheck(node3, sizeof(*node3));
+        for (const Resource::res_dir_entry *rde2 = node2->entries + ic2 - 1; --ic2 >= 0; rde2--) { // id
+            const Resource::res_dir *node3 = ACC_STATIC_CAST(const Resource::res_dir *, (const void *)(resBuf + (rde2->child & 0x7fffffff)));
+            res->ibufcheck(node3, sizeof(*node3));
             int ic3 = node3->identr + node3->namedentr;
             if (ic3 == 0) continue;
-            for (const res_dir_entry *rde3 = node3->entries + ic3 - 1; --ic3 >= 0; rde3--) { // data
-                const res_data *data = ACC_STATIC_CAST(const res_data *, (const void *)(resBuf + (rde3->child & 0x7fffffff)));
-                if (data->size > 0) {
-                    ibuf.fill(data->offset, data->size, FILLVAL);
-                    set_le32((char *const)data + offsetof(res_data, size), 0);
+            for (const Resource::res_dir_entry *rde3 = node3->entries + ic3 - 1; --ic3 >= 0; rde3--) { // data
+                const Resource::res_data *data = ACC_STATIC_CAST(const Resource::res_data *, (const void *)(resBuf + (rde3->child & 0x7fffffff)));
+                if (rde->tnl == RT_VERSION || rde->tnl == RT_GROUP_ICON || rde->tnl == RT_ICON || rde->tnl == RT_ANIICON) {
+                    if (data->size > 0) {
+                        ibuf.fill(data->offset, data->size, FILLVAL);
+                        set_le32((char *const)data + offsetof(Resource::res_data, size), 0);
+                    }
+                    // change type to RT_RCDATA (raw)
+                    set_le32((char *const)rde, 10);
+                } else {
+                    set_le16(addrReloc + 8 + count * 2, rde3->child | IMAGE_REL_BASED_HIGHLOW << 12);
+                    count += 1;
                 }
             }
         }
-        // change type to RT_RCDATA (raw)
-        set_le32((char *const)rde, 10);
+    }
+
+    unsigned size = 8 + 2 * count;
+    set_le32(addrReloc + 4, size);
+
+    if (IDADDR(PEDIR_BASERELOC) == 0) {
+        iddirs[PEDIR_BASERELOC].vaddr = addrReloc - (unsigned char *)ibuf.getVoidPtr();
+        iddirs[PEDIR_BASERELOC].size = size;
+    } else {
+        iddirs[PEDIR_BASERELOC].size += size;
     }
 }
 
@@ -2420,8 +2463,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     if (last_section_rsrc_only)
         processResources(&res);
     else {
-        soresources = 0;
-        res.cleanse(ibuf, (const char *)ibuf.subref("bad res %#x", IDADDR(PEDIR_RESOURCE), 1));
+        cleanseResources(objs, &res);
     }
     processExports(&xport);
     processRelocs();
@@ -2628,8 +2670,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     if (last_section_rsrc_only)
         callProcessResources(res, ic = res_start);
 
-    const unsigned ncsize =
-        soxrelocs + soimpdlls + soexport + (!last_section_rsrc_only ? soresources : 0);
+    const unsigned ncsize = soxrelocs + soexport;
     assert((soxrelocs == 0) == !has_oxrelocs);
     assert((ncsize == 0) == !has_ncsection);
 
@@ -2705,12 +2746,12 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         ODADDR(PEDIR_EXCEPTION) = 0;
         ODSIZE(PEDIR_EXCEPTION) = 0;
         size_t dirTable = pe_offset + offsetof(ht, ddirs);
-        const int codeOffsetAdded = osection[3].vaddr - ih.codebase;
         linker->defineSymbol("dir_table", dirTable);
-        linker->defineSymbol("res_vaddr", IDADDR(PEDIR_RESOURCE) + codeOffsetAdded);
+        linker->defineSymbol("res_vaddr", IDADDR(PEDIR_RESOURCE) - ih.codebase);
         linker->defineSymbol("res_size", IDSIZE(PEDIR_RESOURCE));
-        linker->defineSymbol("exc_vaddr", IDADDR(PEDIR_EXCEPTION) + codeOffsetAdded);
+        linker->defineSymbol("exc_vaddr", IDADDR(PEDIR_EXCEPTION) - ih.codebase);
         linker->defineSymbol("exc_size", IDSIZE(PEDIR_EXCEPTION));
+        linker->defineSymbol("image_size", oh.imagesize + 0x10000); // AllocationGranularity
     }
 
     oh.datasize = osection[1].vsize + (has_ncsection ? osection[2].vsize : 0);
@@ -2771,9 +2812,9 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     auto *secStart = linker->findSection("START");
     auto *symEnd = linker->findSymbol("DATA1_END");
     upx_uint64_t obSize = symEnd->section->offset - secStart->offset + symEnd->offset;
-    // for (unsigned i = 0; i < obSize; i += sizeof(LEXX)) {
-    //     *(LEXX *)(secStart->output + i) ^= xor_key_loader;
-    // }
+    for (unsigned i = 0; i < obSize; i += sizeof(LEXX)) {
+        *(LEXX *)(secStart->output + i) ^= xor_key_loader;
+    }
     secStart = linker->findSection("DATA2");
     symEnd = linker->findSymbol("DATA2_END");
     obSize = symEnd->section->offset - secStart->offset + symEnd->offset;

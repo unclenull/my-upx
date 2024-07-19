@@ -70,7 +70,7 @@
 // =============
 
 section         PREFIX
-        jmp START
+        // jmp START
                 mov     rdx, IMM64(xor_key_loader)
                 lea     rsi, [rip + START]
                 lea     rdi, [rip + DATA1_END]
@@ -105,16 +105,12 @@ section         PEMAIN01
                 lea     rcx, [rip + VirtualAlloc]
                 call    get_kernel32_proc
 
-                xor     rcx, rcx
+                lea     rcx, [rip + image_size] // the memory after this image is free, to ensure those offsets are within 4 bytes
                 mov     rdx, IMM64(uncompressed_size)
-                mov     r8, 0x1000
+                mov     r8, 0x3000
                 mov     r9, 0x40
                 call    rax
                 mov     rdi, rax // start_of_uncompressed
-                # mov     rax, 15
-                # add     rdi, rax
-                # not     rax
-                # and     rdi, rax // align  to 16
 
 #
 # DEOBFUSCATE START
@@ -389,23 +385,44 @@ section         PERELOC2
                 add     rdi, 4
 section         PERELOC3
                 lea     rbx, [rsi - 4]
+                xor     rcx, rcx // is_32bits
+                lea     rax, [rip + vp_base]
+                mov     r9, rsi
+                sub     r9, rax // (uncompressed base - image base)
+
 reloc_main:
                 xor     eax, eax
                 mov     al, [rdi]
                 inc     rdi
                 or      eax, eax
                 jz      SHORT(reloc_endx)
-                cmp     al, 0xEF
+                cmp     al, 0x7f
                 ja      reloc_fx
 reloc_add:
+                or      cl, cl
+                jnz     SHORT(reloc_32)
                 add     rbx, rax
                 mov     rax, [rbx]
                 bswap   rax
                 add     rax, rsi
                 mov     [rbx], rax
                 jmp     reloc_main
+                reloc_32: // relocate RVA
+                add     rbx, rax
+                mov     eax, [rbx]
+                bswap   eax
+                add     eax, r9d
+                mov     [rbx], eax
+                jmp     reloc_main
 reloc_fx:
-                and     al, 0x0F
+                mov     cl, al
+                and     cl, 0x40
+                cmp     cl, ch
+                je      SHORT(same_type)
+                mov     ch, cl
+                lea     rbx, [rsi - 4] // reset the base address
+                same_type:
+                and     al, 0x3F
                 shl     eax, 16
                 mov     ax, [rdi]
                 add     rdi, 2
@@ -462,10 +479,20 @@ section         PEDEPHAK
                 sub     rsp, 0x20
                 call    [rip + VirtualProtectAddr]                     // VirtualProtect
 
+                mov     rcx, rsi
+                sub     rcx, rdi // add to (uncompressed base - image base)
+                mov     rdx, IMM64(uncompressed_size)
+                add     rdx, rcx
                 lea     rax, [rdi + dir_table]
-                mov     [rax + 8*2], IMM32(res_vaddr)
+                mov     [rax + -0x38], edx // new image size, FindResource will check this
+                xor     rdx, rdx
+                mov     edx, IMM32(res_vaddr)
+                add     edx, ecx
+                mov     [rax + 8*2], edx
                 mov     [rax + 8*2 + 4], IMM32(res_size)
-                mov     [rax + 8*3], IMM32(exc_vaddr)
+                mov     edx, IMM32(exc_vaddr)
+                add     edx, ecx
+                mov     [rax + 8*3], edx
                 mov     [rax + 8*3 + 4], IMM32(exc_size)
 
                 lea     r9, [rsp + 0x20]

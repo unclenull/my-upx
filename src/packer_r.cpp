@@ -33,6 +33,82 @@
 // returns number of **bytes** written to 'out'
 **************************************************************************/
 
+unsigned Packer::optimizeRelocEx(unsigned *relocnumList, LE32 **relocsList, SPAN_S(byte) out,
+                               SPAN_P(byte) image, unsigned image_size, int bits, bool bswap,
+                               int *big) {
+    assert(bits == 32 || bits == 64);
+    mem_size_assert(1, image_size);
+    SPAN_S_VAR(byte, fix, out);
+
+    *big = 0;
+    if (opt->exact)
+        throwCantPackExact();
+
+    // for(__int8 type : {IMAGE_REL_BASED_HIGHLOW, IMAGE_REL_BASED_DIR64}) {
+    for(__int8 type : {3, 10}) {
+        unsigned relocnum = relocnumList[type];
+        if (relocnum == 0) continue;
+        SPAN_P(byte) relocs((byte *)relocsList[type]);
+        // unsigned __int8 meta = IMAGE_REL_BASED_HIGHLOW == type ? 0xc0 : 0x80; // this second bit indicating 32 bits
+        unsigned __int8 meta = 3 == type ? 0xc0 : 0x80; // this second bit indicating 32 bits
+        bits = 3 == type ? 32 : 64;
+#if WITH_XSPAN >= 2
+    ptr_check_no_overlap(relocs.data(), relocs.size_bytes(), image.data(image_size), image_size,
+                         out.data(), out.size_bytes());
+#endif
+
+        upx_qsort(raw_bytes(relocs, 4 * relocnum), relocnum, 4, le32_compare);
+        if (0) {
+            printf("optimizeReloc: u_reloc %9u checksum=0x%08x\n", 4 * relocnum,
+                    upx_adler32(relocs, 4 * relocnum));
+            printf("optimizeReloc: u_image %9u checksum=0x%08x\n", image_size,
+                    upx_adler32(image, image_size));
+        }
+
+        unsigned pc = (unsigned) -4;
+        for (unsigned i = 0; i < relocnum; i++) {
+            unsigned delta = get_le32(relocs + i * 4) - pc;
+            if (delta == 0)
+                continue;
+            else if ((int) delta < 4)
+                throwCantPack("overlapping fixups");
+            else if (delta < 0x80)
+                *fix++ = (byte) delta;
+            // else if (delta < 0x100000) {
+            else if (delta < 0x800000) { // meta uses 2 bits rather than 4
+                *fix++ = (byte) (meta + (delta >> 16));
+                *fix++ = (byte) delta;
+                *fix++ = (byte) (delta >> 8);
+            } else {
+                *big = 1;
+                *fix++ = meta;
+                *fix++ = 0;
+                *fix++ = 0;
+                set_le32(fix, delta);
+                fix += 4;
+            }
+            pc += delta;
+            if (pc + 4 > image_size)
+                throwCantPack("bad reloc[%#x] = %#x", i, pc);
+            if (bswap) {
+                if (bits == 32)
+                    set_be32(image + pc, get_le32(image + pc));
+                else
+                    set_be64(image + pc, get_le64(image + pc));
+            }
+        }
+        }
+
+        *fix++ = 0; // end marker
+        const unsigned bytes = ptr_udiff_bytes(fix, out);
+        if (0) {
+            printf("optimizeReloc: c_reloc %9u checksum=0x%08x\n", bytes, upx_adler32(out, bytes));
+            printf("optimizeReloc: c_image %9u checksum=0x%08x\n", image_size,
+                    upx_adler32(image, image_size));
+        }
+        return bytes;
+}
+
 /*static*/
 unsigned Packer::optimizeReloc(unsigned relocnum, SPAN_P(byte) relocs, SPAN_S(byte) out,
                                SPAN_P(byte) image, unsigned image_size, int bits, bool bswap,
