@@ -26,15 +26,25 @@
  */
 
 #pragma once
+#pragma warning(disable: 5030) // unrecognized attribute '__declspec'
+#include <vector>
+#pragma warning(default: 5030)
+#include <random>
 
 /*************************************************************************
 // general/pe handling
 **************************************************************************/
 
+class Host;
+
 class PeFile : public Packer {
+    friend Host;
     typedef Packer super;
 public:
     virtual int getVersion() const override { return 13; }
+    unsigned garbage_len;
+    Linker *bsLinker;
+    unsigned rvamin;
 protected:
     class Interval;
     class Reloc;
@@ -162,7 +172,6 @@ protected:
 
     bool importbyordinal = false;
     bool kernel32ordinal = false;
-    unsigned rvamin;
     unsigned cimports; // rva of preprocessed imports
     unsigned crelocs;  // rva of preprocessed fixups
     int big_relocs;
@@ -522,6 +531,8 @@ protected:
         void build(char *base, unsigned newoffs);
         unsigned getsize() const { return size; }
     };
+    std::vector<std::string> getHostFiles(const char * folder);
+    virtual Host* createHost(PeFile *pe){return 0;};
 };
 
 class PeFile32 : public PeFile {
@@ -582,8 +593,12 @@ protected:
         ddirs_t ddirs[16];
     };
 
+    Host* createHost(PeFile *pe){return 0;};
+public:
     pe_header_t ih, oh;
 };
+
+class Host64;
 
 class PeFile64 : public PeFile {
     typedef PeFile super;
@@ -643,7 +658,94 @@ protected:
         ddirs_t ddirs[16];
     };
 
+    Host* createHost(PeFile *pe);
+public:
     pe_header_t ih, oh;
 };
 
+class Host {
+public:
+    unsigned coverup = 0;
+    unsigned embededBase;
+    unsigned embededVBase;
+    unsigned embededSize;
+    virtual MemBuffer& getInBuf() = 0;
+    virtual SPAN_0(PeFile::pe_section_t) getOldSection() = 0;
+    virtual unsigned getSize() = 0;
+    virtual unsigned getPeOffset() = 0;
+    virtual unsigned getSections() = 0;
+    virtual void embed(){};
+};
+
+class Host32 : public PeFile32, public Host {
+public:
+    PeFile32 *pe;
+    Host32(PeFile32 *pe) : PeFile32(&InputFile()){};
+    const char* hostFolder = "c:\\windows\\syswow64\\";
+    MemBuffer& getInBuf() { return ibuf; };
+    SPAN_0(pe_section_t) getOldSection() { return isection; };
+    unsigned getSections() { return ih.objects; };
+    unsigned getSize() { return file_size; };
+    unsigned getPeOffset() { return pe_offset; };
+    void embed() {};
+// dummy
+    int getFormat() const{return 0;};
+    const char *getName() const{return 0;};
+    const char *getFullName(const Options *) const{return 0;};
+    bool needForceOption() const{return 0;};
+    void defineSymbols(unsigned ncsection, unsigned upxsection, unsigned sizeof_oh, unsigned isize_isplit, unsigned s1addr){};
+    void setOhDataBase(const pe_section_t *osection){};
+    void setOhHeaderSize(const pe_section_t *osection){};
+    const int *getCompressionMethods(int,int) const{return 0;};
+    const int *getFilters(void) const{return 0;};
+    upx::tribool canPack(void){return 0;};
+    void pack(OutputFile *){};
+    void buildLoader(const Filter *){};
+    Linker *newLinker(void) const{return 0;};
+};
+
+class Host64 : public PeFile64, public Host {
+    PeFile64 *pe;
+    int * call = 0;
+    int * __native_startup_lock = 0;
+    int * __native_startup_state = 0;
+public:
+    Host64(PeFile64 *pe);
+    ~Host64() noexcept {};
+    const char* hostFolder = "c:\\windows\\system32\\";
+    MemBuffer& getInBuf() { return ibuf; };
+    SPAN_0(pe_section_t) getOldSection() { return isection; };
+    unsigned getSize() { return file_size; };
+    unsigned getPeOffset() { return pe_offset; };
+    unsigned getSections() { return ih.objects; };
+    void embed();
+
+// dummy
+    int getFormat() const{return 0;};
+    const char *getName() const{return 0;};
+    const char *getFullName(const Options *) const{return 0;};
+    bool needForceOption() const{return 0;};
+    void defineSymbols(unsigned ncsection, unsigned upxsection, unsigned sizeof_oh, unsigned isize_isplit, unsigned s1addr){};
+    void setOhDataBase(const pe_section_t *osection){};
+    void setOhHeaderSize(const pe_section_t *osection){};
+    const int *getCompressionMethods(int,int) const{return 0;};
+    const int *getFilters(void) const{return 0;};
+    upx::tribool canPack(void){return 0;};
+    void pack(OutputFile *){};
+    void buildLoader(const Filter *){};
+    Linker *newLinker(void) const{return 0;};
+};
+
+template< class IntType = int >
+class RandomRangeGen {
+    std::random_device rd;
+    std::mt19937 gen;
+    std::uniform_int_distribution<IntType> distrib;
+public:
+    RandomRangeGen(IntType start, IntType end = std::numeric_limits<IntType>::max()): rd(), gen(rd()), distrib(start, end) {};
+    IntType operator()() {
+        return distrib(gen);
+    };
+};
+#define RandomByte() RandomRangeGen<unsigned>(0, 255)()
 /* vim:set ts=4 sw=4 et: */

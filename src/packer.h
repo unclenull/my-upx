@@ -76,13 +76,13 @@ public:
     virtual void doList() = 0;
     virtual void doFileInfo() = 0;
 
-protected:
     InputFile *const fi;                // reference
+    PackHeader ph; // must be filled by canUnpack(); also used by UiPacker
+public:
     union {                             // unnamed union
-        const upx_int64_t file_size;    // must get set by constructor
+        upx_int64_t file_size;    // must get set by constructor
         const upx_uint64_t file_size_u; // (explicitly unsigned to avoid -Wsign-compare casts)
     };
-    PackHeader ph; // must be filled by canUnpack(); also used by UiPacker
 };
 
 /*************************************************************************
@@ -176,8 +176,6 @@ protected:
     virtual Linker *newLinker() const = 0;
     virtual void relocateLoader();
     // loader util for linker
-    virtual byte *getLoader() const;
-    virtual int getLoaderSize() const;
     virtual void initLoader(const void *pdata, int plen, int small = -1, int pextra = 0);
 #define C const char *
     void addLoader(C);
@@ -202,6 +200,8 @@ protected:
 
     // compression handling [see packer_c.cpp]
 public:
+    virtual byte *getLoader() const;
+    virtual int getLoaderSize() const;
     static bool isValidCompressionMethod(int method);
 
 protected:
@@ -306,8 +306,6 @@ protected:
     int ph_version = -1;
 
     // compression buffers
-    MemBuffer ibuf;        // input
-    MemBuffer obuf;        // output
     unsigned ibufgood = 0; // high-water mark in ibuf (pefile.cpp)
 
     // UI handler
@@ -325,6 +323,9 @@ private:
 private:
     // disable copy and move
     UPX_CXX_DISABLE_COPY_MOVE(Packer)
+public:
+    MemBuffer obuf;        // output
+    MemBuffer ibuf;        // input
 };
 
 /* vim:set ts=4 sw=4 et: */

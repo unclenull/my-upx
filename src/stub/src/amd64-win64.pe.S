@@ -70,7 +70,7 @@
 // =============
 
 section         PREFIX
-        // jmp START
+        jmp START
                 mov     rdx, IMM64(xor_key_loader)
                 lea     rsi, [rip + START]
                 lea     rdi, [rip + DATA1_END]
@@ -129,10 +129,6 @@ section         PEMAIN01
 #
 
 
-section         PEICONS1
-                incw    [rdi + icon_offset]
-section         PEICONS2
-                add     [rdi + icon_offset], IMM16(icon_delta)
 section         PETLSHAK
                 lea     rax, [rdi + tls_address]
                 push    [rax]   // save the TLS index
@@ -477,7 +473,7 @@ section         PEDEPHAK
                 mov     rcx, rdi                // address
 
                 sub     rsp, 0x20
-                call    [rip + VirtualProtectAddr]                     // VirtualProtect
+                call    [rip + VirtualProtectAddr]
 
                 mov     rcx, rsi
                 sub     rcx, rdi // add to (uncompressed base - image base)
@@ -629,11 +625,12 @@ section         GET_KERNEL32_PROC
                 sub     rsp, 0x28
                 call    dummpy_func
                 add     rsp, 0x28
-                jmp     unprotect_bootstrap_start
+                // jmp     unprotect_bootstrap_start
+                jmp unprotect_bootstrap_end
 #
 # UNPROTECT START
 #
-        // jmp unprotect_bootstrap_end
+
 unprotect_bootstrap_start:
         // initial protect value
                 sub     rcx, r8 // they are equal (need verify in all OS)
@@ -658,21 +655,7 @@ unprotect_bootstrap_end:
                 call    GetKernel32Proc
                 mov     [rip + virtual_protect_addr], rax
 
-
-                sub     rsp, 0x28
-
-                mov     r9, rsp
-                mov     r8d, esi                 // PAGE_EXECUTE_READWRITE
-                lea     rcx, [rip + data_section]                     // VirtualProtect
-                mov     rdx, IMM64(data_section_size)   // size
-                call    [rip + virtual_protect_addr]                     // VirtualProtect
-
-                mov     r9, rsp
-                mov     r8d, esi                 // PAGE_EXECUTE_READWRITE
-
-                add     rsp, 0x28
                 lea     rax, [rip + upx_start]
-                sub     rax, rsi
                 jmp     rax
 #
 # UNPROTECT END

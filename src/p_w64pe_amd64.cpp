@@ -91,7 +91,7 @@ void PackW64PeAmd64::buildLoader(const Filter *ft) {
     if (isefi)
         addLoader("PEISEFI0");
     addLoader(isdll ? "PEISDLL1" : "", "PEMAIN01",
-              icondir_count > 1 ? (icondir_count == 2 ? "PEICONS1" : "PEICONS2") : "",
+              // icondir_count > 1 ? (icondir_count == 2 ? "PEICONS1" : "PEICONS2") : "",
               tmp_tlsindex ? "PETLSHAK" : "", "PEMAIN02",
               // ph.first_offset_found == 1 ? "PEMAIN03" : "",
               M_IS_LZMA(ph.method)    ? "LZMA_HEAD,LZMA_ELF00,LZMA_DEC20,LZMA_TAIL"
@@ -159,8 +159,8 @@ bool PackW64PeAmd64::needForceOption() const {
     return r;
 }
 
-void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsigned uncompressedSection,
-                                   unsigned ic, unsigned s1addr) {
+void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsigned headerSize,
+                                   unsigned start_of_compressed, unsigned s1addr) {
     const unsigned myimport = ncsection + soresources - rvamin;
     // patch loader
     // linker->defineSymbol("original_entry", ih.entry + (uncompressedSection - rvamin));
@@ -194,7 +194,7 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
     //     // linker->defineSymbol("VirtualProtect", ilinkerGetAddress("kernel32.dll", "VirtualProtect"));
     // }
     linker->defineSymbol("vp_base", 0); // relocated to image base + offset 0
-    linker->defineSymbol("vp_size", osection[0].vaddr);
+    linker->defineSymbol("vp_size", headerSize);
 
     linker->defineSymbol("start_of_relocs", crelocs);
 
@@ -217,23 +217,22 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
     // because windoze zeroes the word pointed by tlsindex before
     // it starts programs
     linker->defineSymbol("tls_value",
-                         (tlsindex + 4 > s1addr) ? get_le32(obuf + tlsindex - s1addr - ic) : 0);
+                         (tlsindex + 4 > s1addr) ? get_le32(obuf + tlsindex - s1addr) : 1);
     linker->defineSymbol("tls_address", tlsindex - rvamin);
 
-    linker->defineSymbol("icon_delta", icondir_count - 1);
-    linker->defineSymbol("icon_offset", ncsection + icondir_offset - rvamin);
+    // linker->defineSymbol("icon_delta", icondir_count - 1);
+    // linker->defineSymbol("icon_offset", ncsection + icondir_offset - rvamin);
 
-    const unsigned esi0 = s1addr + ic;
     // linker->defineSymbol("start_of_uncompressed", uncompressedSection);
     linker->defineSymbol("uncompressed_size", ph.u_len);
-    linker->defineSymbol("start_of_compressed", esi0);
+    linker->defineSymbol("start_of_compressed", start_of_compressed);
 
     if (use_tls_callbacks) {
         linker->defineSymbol("tls_callbacks_ptr", tlscb_ptr - ih.imagebase);
         linker->defineSymbol("tls_module_base", 0u - rvamin);
     }
 
-    linker->defineSymbol("PREFIX", upxsection); // start address, move all sections following
+    linker->defineSymbol("PREFIX", start_of_compressed + ph.c_len + garbage_len); // loader fgnegvag address, move all sections following
     // linker->defineSymbol("START", upxsection);
 }
 

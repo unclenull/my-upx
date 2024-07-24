@@ -1,3 +1,4 @@
+## build
 - build exe
   + on windows
   + gnu make is required
@@ -12,6 +13,9 @@
       tar -xoaf bin-upx-20221212.tar.xz /C ~/.local/bin/
       rm bin-upx-20221212.tar.xz
     ```
+
+## notes
+- relocations are changed to be offset from the codebase/uncompressed starting point
 
 ## improvements
 - xor loader & compressed
