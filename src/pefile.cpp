@@ -2598,7 +2598,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     int loaderSize;
     byte *linkerOutput = linker->getLoader(&loaderSize);
     printf("loader size %x\n", loaderSize);
-    int alignedLoaderSize = (loaderSize + 15) & ~15; // important otherwise break movdqa
+    int alignedLoaderSize = (loaderSize + 15) & ~15; // important, PE code section should be 16 aligned otherwise break movdqa
     if (alignedLoaderSize > loaderSize) {
         linker->alignWithByte(alignedLoaderSize - loaderSize, RandomByte());
         loaderSize = alignedLoaderSize;
