@@ -1685,6 +1685,7 @@ void PeFile::Resource::ibufcheck(const void *m, unsigned siz) {
 
 /*
  * Drop version, icon
+ * Relocate reserved
  */
 void PeFile::cleanseResources(const unsigned objs, Resource *res) {
     soresources = 0; // Clear from host image
@@ -2354,6 +2355,7 @@ void PeFile::callProcessResources(Resource &res, unsigned &ic) {
 
 template <typename LEXX>
 LEXX generateXorKey() {
+    srand(time(NULL));
     LEXX xor_key;
     xor_key = 0;
     for (unsigned i = 0; i < sizeof(LEXX); i++) {
@@ -2375,6 +2377,9 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     // FIXME: we need to think about better support for --exact
     if (opt->exact)
         throwCantPackExact();
+
+    using UnitType = std::conditional<std::is_same<LEXX, LE64>::value, upx_uint64_t, upx_uint32_t>::type;
+    unsigned char UnitSize = sizeof(LEXX);
 
     const unsigned objs = ih.objects;
     readSectionHeaders(objs, sizeof(ih));
@@ -2474,7 +2479,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     crelocs = cimports + soimport; // rva of preprocessed fixups
 
     ph.u_len = newvsize + soimport + sorelocs;
-    obuf.allocForCompression(ph.u_len, ph.u_len / 10); // extra 10% for garbage
+    obuf.allocForCompression(ph.u_len, ph.u_len / 2); // extra 50% for shallow & garbage
 
     // prepare packheader
     if (ph.u_len < rvamin) { // readSectionHeaders() should have caught this
@@ -2498,42 +2503,80 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
     callCompressWithFilters(ft, filter_strategy, ih.codebase);
 
-
     // prepare bootstrap
     bsLinker = newLinker();
     bsLinker->init(stub_amd64_win64_pe, sizeof(stub_amd64_win64_pe));
-    bsLinker->addLoader("GET_KERNEL32_PROC");
-    int bssize;
-    byte *bsloader = bsLinker->getLoader(&bssize);
-    printf("bootstrap size %x\n", bssize);
+    bsLinker->addLoader("UPX_STUB");
+
+    Linker *ldLinker = newLinker();
+    ldLinker->init(stub_amd64_win64_pe, sizeof(stub_amd64_win64_pe));
+    ldLinker->addLoader("LOADER_DECODER");
+    byte *ldloader = ldLinker->getLoader(&loader_decoder_size);
+    printf("loader_decoder_size %x\n", loader_decoder_size);
 
     /*
      * OBFUSCATE COMPRESSED STARTS
      */
-    srand(time(NULL));
     LEXX xor_key_compressed = generateXorKey<LEXX>();
+    printf("xor_key_compressed: %016llx\n", (__int64)xor_key_compressed);
     byte *obufStart = (byte *)obuf.getVoidPtr();
-    for (unsigned i = 0; i < ph.c_len; i += sizeof(LEXX)) {
+    for (unsigned i = 0; i < ph.c_len; i += UnitSize) {
         *(LEXX *)(obufStart + i) ^= xor_key_compressed;
     }
-    linker->defineSymbol("xor_key_compressed", xor_key_compressed);
+    printf("compressed_size: 0x%x\n", ph.c_len);
+    ph.c_len = (ph.c_len + UnitSize - 1) & ~(UnitSize - 1);
+    printf("compressed_size aligned: 0x%x\n", ph.c_len);
     linker->defineSymbol("compressed_size", ph.c_len);
 
-    // garbage of max of 10% of the compressed size and within 10k (20 sectors)
-    int maxSectors = ph.c_len / 10 / 512;
+    UnitType mask_tpl(-1);
+    {
+        // Extract random bytes to the shallow area to mimic entropy
+        UnitType *shallowStart = (UnitType *)(obufStart + ph.c_len);
+        LEXX *compressedStart = (LEXX *)obufStart;
+        RandomRangeGen<unsigned short> zerosGen(0, UnitSize);
+        RandomRangeGen<unsigned short> rotatationGen(0, UnitSize - 1);
+
+        for (unsigned ix = 0; ix < ph.c_len/UnitSize; ix++) {
+            unsigned short zeroCount = zerosGen();
+            if (zeroCount == 0) { // no extraction
+                shallowStart[ix] = 0;
+            } else if (zeroCount == UnitSize) { // full extraction
+                shallowStart[ix] = compressedStart[ix];
+                compressedStart[ix] = 0;
+            } else {
+                UnitType mask = mask_tpl >> (zeroCount * 8);
+                unsigned short shifts = rotatationGen();
+                if (shifts > 0) {
+                    shifts *= 8;
+                    mask = (mask << shifts) | (mask >> (UnitSize - shifts));
+                }
+                UnitType orig = compressedStart[ix];
+                compressedStart[ix] = orig & mask;
+                shallowStart[ix] = orig & ~mask;
+            }
+        }
+    }
+
+    // garbage of max of 5% of the compressed size and within 10k (20 sectors)
+    int maxSectors = ph.c_len / 5 / 512;
     if (maxSectors > 20) {
         maxSectors = 20;
     }
-    srand(time(NULL));
     garbage_len = 512 * (rand() % maxSectors + 1); // at least 1
-
-    byte *garbageStart = obufStart + ph.c_len;
-    for (unsigned i = 0; i < garbage_len; i++) {
-        garbageStart[i] = rand() % 256;
-    }
-    printf("xor_key_compressed: 0x%llx\n", (upx_uint64_t)xor_key_compressed);
-    printf("compressed_size: 0x%x\n", ph.c_len);
     printf("garbage bytes: 0x%x\n", garbage_len);
+    unsigned garbageOffset = ph.c_len * 2;
+    unsigned obfuscatedSize = garbageOffset + garbage_len;
+    printf("obfuscatedSize: 0x%x\n", obfuscatedSize);
+    const unsigned loaderSize = getLoaderSize();
+    embededSize = obfuscatedSize + loaderSize;
+    printf("embededSize: 0x%x\n", embededSize);
+    RandomRangeGen<unsigned __int64> garbageGen(0);
+    RandomRangeGen<short> maskGen(0, UnitSize);
+    UnitType *garbageStart = (UnitType *)(obufStart + ph.c_len * 2);
+    for (unsigned i = 0; i < garbage_len/UnitSize; i++) {
+        garbageStart[i] = garbageGen();
+        garbageStart[i] &= mask_tpl >> (maskGen() * UnitSize); // clear random leading bytes to mimic a real data
+    }
     /*
      * OBFUSCATE COMPRESSED ENDS
      */
@@ -2546,124 +2589,8 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     const int oh_filealign = UPX_MIN(ih.filealign, 0x200);
     const unsigned fam1 = oh_filealign - 1;
 
-    int codesize;
-    linker->getLoader(&codesize);
-
-    // const bool has_oxrelocs =
-    //     !opt->win32_pe.strip_relocs && (use_stub_relocs || sotls || loadconfiv.ivnum);
-    const bool has_oxrelocs = !opt->win32_pe.strip_relocs && (use_stub_relocs || sotls);
-    // const bool has_ncsection = has_oxrelocs || soimpdlls || soexport || soresources;
-    const bool has_ncsection = has_oxrelocs || soexport;
-    const unsigned oobjs = last_section_rsrc_only ? 4 : has_ncsection ? 3 : 2;
-    ////pe_section_t osection[oobjs];
-    memset(osection, 0, sizeof(osection));
-    // section 0 : bss
-    //         1 : [ident + header] + packed_data + unpacker + tls + loadconf
-    //         2 : not compressed data
-    //         3 : resource data -- wince/arm 5 needs a new section for this
-
-    // the last section should start with the resource data, because lots of lame
-    // windoze codes assume that resources starts on the beginning of a section
-
-    // note: there should be no data in the last section which needs fixup
-
-    // identsplit - number of ident + (upx header) bytes to put into the PE header
-    const unsigned sizeof_osection = sizeof(osection[0]) * oobjs;
-
-    unsigned c_len = ph.c_len;
-    const unsigned aligned_sotls = ALIGN_UP(sotls, (unsigned) sizeof(LEXX));
-    const unsigned s1size =
-        // ALIGN_UP(c_len + codesize, (unsigned) sizeof(LEXX)) + aligned_sotls + soloadconf;
-        ALIGN_UP(c_len + codesize + garbage_len, (unsigned) sizeof(LEXX)) + aligned_sotls + soloadconf;
-    const unsigned s0size = (bssize + fam1) & ~fam1;;
-    const unsigned s0vsize = (s0size + oam1) & ~oam1;;
-    const unsigned s1addr = rvamin + s0vsize;
-
-    const unsigned ncsection = (s1addr + s1size + oam1) & ~oam1;
-    // const unsigned upxsection = s1addr + c_len;
-    const unsigned upxsection = s1addr + c_len + garbage_len;
-
-    Reloc rel(1024); // new stub relocations are put here
-    addNewRelocations(rel, upxsection);
-
-    // new PE header
-    memcpy(&oh, &ih, sizeof(oh));
-    oh.filealign = oh_filealign; // identsplit depends on this
-
-    oh.entry = rvamin;
-    oh.objects = oobjs;
-    oh.chksum = 0;
-
-    // fill the data directory
-    ODADDR(PEDIR_DEBUG) = 0;
-    ODSIZE(PEDIR_DEBUG) = 0;
-    ODADDR(PEDIR_IAT) = 0;
-    ODSIZE(PEDIR_IAT) = 0;
-    ODADDR(PEDIR_BOUND_IMPORT) = 0;
-    ODSIZE(PEDIR_BOUND_IMPORT) = 0;
-
-    // tls & loadconf are put into section 1
-    unsigned ic = s1addr + s1size - aligned_sotls - soloadconf;
-
-    if (use_tls_callbacks)
-        tls_handler_offset = linker->getSymbolOffset("PETLSC2") + upxsection;
-
-    processTls(&rel, &tlsiv, ic);
-    ODADDR(PEDIR_TLS) = aligned_sotls ? ic : 0;
-    ODSIZE(PEDIR_TLS) = aligned_sotls ? (sizeof(LEXX) == 4 ? 0x18 : 0x28) : 0;
-    ic += aligned_sotls;
-
-    // processLoadConf(&rel, &loadconfiv, ic);
-    ODADDR(PEDIR_LOAD_CONFIG) = soloadconf ? ic : 0;
-    ODSIZE(PEDIR_LOAD_CONFIG) = soloadconf;
-    ic += soloadconf;
-
-    const bool rel_at_sections_start = last_section_rsrc_only;
-
-    ic = ncsection;
-    if (rel_at_sections_start)
-        callProcessStubRelocs(rel, ic);
-
-    processImports2(ic, getProcessImportParam(upxsection));
-    ODADDR(PEDIR_IMPORT) = soimpdlls ? ic : 0;
-    ODSIZE(PEDIR_IMPORT) = soimpdlls;
-    ic += soimpdlls;
-
-    processExports(&xport, ic);
-    ODADDR(PEDIR_EXPORT) = soexport ? ic : 0;
-    ODSIZE(PEDIR_EXPORT) = soexport;
-    if (!isdll && opt->win32_pe.compress_exports) {
-        ODADDR(PEDIR_EXPORT) = IDADDR(PEDIR_EXPORT);
-        ODSIZE(PEDIR_EXPORT) = IDSIZE(PEDIR_EXPORT);
-    }
-    ic += soexport;
-
-    if (!rel_at_sections_start)
-        callProcessStubRelocs(rel, ic);
-
-    // when the resource is put alone into section 3
-    const unsigned res_start = (ic + oam1) & ~oam1;
-    if (last_section_rsrc_only)
-        callProcessResources(res, ic = res_start);
-
-    const unsigned ncsize = soxrelocs + soexport;
-    assert((soxrelocs == 0) == !has_oxrelocs);
-    assert((ncsize == 0) == !has_ncsection);
-
-    // this one is tricky: it seems windoze touches 4 bytes after
-    // the end of the relocation data - so we have to increase
-    // the virtual size of this section
-    const unsigned ncsize_virt_increase = soxrelocs && (ncsize & oam1) == 0 ? 8 : 0;
-    const unsigned ncvsize = (ncsize + ncsize_virt_increase + oam1) & ~oam1;
-
     Host* host = createHost(this);
 
-    // only works for amd64 (!last_section_rsrc_only) now
-    // restore Resource & Exception table.
-    ODADDR(PEDIR_RESOURCE) = 0;
-    ODSIZE(PEDIR_RESOURCE) = 0;
-    ODADDR(PEDIR_EXCEPTION) = 0;
-    ODSIZE(PEDIR_EXCEPTION) = 0;
     size_t dirTable = host->getPeOffset() + offsetof(ht, ddirs);
     linker->defineSymbol("dir_table", dirTable);
     linker->defineSymbol("res_vaddr", IDADDR(PEDIR_RESOURCE) - ih.codebase);
@@ -2673,77 +2600,77 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     ht *header = (ht *)(host->getInBuf() + host->getPeOffset());
     linker->defineSymbol("image_size", header->imagesize + 0x10000); // AllocationGranularity
 
-    oh.datasize = osection[1].vsize + (has_ncsection ? osection[2].vsize : 0);
-    setOhDataBase(osection);
-    oh.codesize = osection[0].vsize;
-    oh.codebase = osection[0].vaddr;
-    setOhHeaderSize(osection);
-    if (rvamin < osection[1].rawdataptr) {
-        throwCantPack("object alignment too small rvamin=%#x oraw=%#x", rvamin,
-                      unsigned(osection[1].rawdataptr));
-    }
-
-    if (opt->win32_pe.strip_relocs)
-        oh.flags |= IMAGE_FILE_RELOCS_STRIPPED;
-
+    printf("embededVBase %x\n", host->embededVBase);
+    unsigned upx_start = host->embededVBase + obfuscatedSize;
     SPAN_0(pe_section_t) hostSection = host->getOldSection();
-    defineSymbols(ncsection, upxsection, hostSection[0].vaddr, host->embededVBase, s1addr);
+    defineSymbols(0, upx_start, hostSection[0].vaddr, host->embededVBase, 0);
     defineFilterSymbols(&ft);
+    relocateLoader();
 
-    LEXX xor_key_loader = generateXorKey<LEXX>();
-    linker->defineSymbol("xor_key_loader", xor_key_loader);
-    printf("xor_key_loader: 0x%llx\n", (upx_uint64_t)xor_key_loader);
+    RandomRangeGen<> offsetGen(0, garbage_len - loader_decoder_size);
+    loader_decoder_offset_in_garbage = offsetGen();
+    printf("loader_decoder_offset_in_garbage %x\n", loader_decoder_offset_in_garbage);
+    unsigned loader_decoder_rva = host->embededVBase + garbageOffset + loader_decoder_offset_in_garbage;
 
     /*
     * prepare bootstrap starts
     */
-    bsLinker->defineSymbol("GET_KERNEL32_PROC", hostSection[0].vaddr + hostSection[0].vsize); // relocate the section start address
-    auto *sym = bsLinker->findSymbol("GetKernel32Proc");
-    linker->defineSymbol("get_kernel32_proc", sym->section->offset + sym->offset);
-    relocateLoader();
+    if (host->isCmdlineFunc) {
+        bsLinker->addLoader("CMD_CALL");
+    } else {
+        bsLinker->addLoader("CMD_READ");
+    }
+    if (host->isWide) {
+        bsLinker->addLoader("CMD_WCHAR");
+    } else {
+        bsLinker->addLoader("CMD_CHAR");
+    }
 
-    bsLinker->defineSymbol("xor_key_loader", xor_key_loader);
-    bsLinker->defineSymbol("upx_start", host->embededVBase + c_len + garbage_len);
-    // bsLinker->defineSymbol("data_section", hostSection[host->getSections() - 2].vaddr);
-    // bsLinker->defineSymbol("data_section_size", hostSection[host->getSections() - 2].vsize);
-    auto *symDATA2 = linker->findSymbol("DATA2");
-    bsLinker->defineSymbol("data2", symDATA2->section->offset + symDATA2->offset);
-    auto *symDATA2_END = linker->findSymbol("DATA2_END");
-    bsLinker->defineSymbol("data2_len", symDATA2_END->offset + symDATA2->offset);
-    sym = linker->findSymbol("kernel32");
-    bsLinker->defineSymbol("kernel_32", sym->section->offset + sym->offset);
-    sym = linker->findSymbol("VirtualProtect");
-    bsLinker->defineSymbol("virtual_protect", sym->section->offset + sym->offset);
-    sym = linker->findSymbol("kernel32BaseAddr");
-    bsLinker->defineSymbol("kernel32_base_addr", sym->section->offset + sym->offset);
-    sym = linker->findSymbol("VirtualProtectAddr");
-    bsLinker->defineSymbol("virtual_protect_addr", sym->section->offset + sym->offset);
+    bsLinker->addLoader("UPX_STUB_MAIN01");
+    // ensure (loader_decoder_rva - data_random) is multiple of 256
+    // e.g. zeros at the lower byte
+    unsigned data_random = hostSection[1].vaddr + (RandomRange(1, hostSection[1].vsize >> 8) << 8);
+    data_random |= loader_decoder_rva & 0xff;
+    unsigned loader_decoder_offset = (loader_decoder_rva - data_random) >> 8;
+    if (loader_decoder_offset > 0xffff) {
+        bsLinker->addLoader("UPX_STUB_SMALL");
+    } else {
+        bsLinker->addLoader("UPX_STUB_LARGE");
+    }
+    bsLinker->addLoader("UPX_STUB_MAIN02");
+
+    bsLinker->defineSymbol("UPX_STUB", hostSection[0].vaddr + hostSection[0].vsize); // relocate the section start address
+    bsLinker->defineSymbol("data_random", data_random);
+    bsLinker->defineSymbol("loader_decoder_offset", loader_decoder_offset);
+    bsLinker->defineSymbol("argv", host->argv);
+    if (host->argc) {
+        bsLinker->defineSymbol("argc", host->argc);
+    }
     bsLinker->relocate();
     /*
     * prepare bootstrap ends
     */
 
+    char xor_key_loader = RandomByte();
+    printf("xor_key_loader %x\n", xor_key_loader);
 
+    ldLinker->defineSymbol("LOADER_DECODER", loader_decoder_rva);
+    ldLinker->defineSymbol("xor_key_loader", xor_key_loader);
+    ldLinker->defineSymbol("loader_start", host->embededVBase + obfuscatedSize);
+    ldLinker->defineSymbol("loader_end", host->embededVBase + obfuscatedSize + loaderSize);
+    ldLinker->relocate();
+    memcpy((char *)garbageStart + loader_decoder_offset_in_garbage, ldloader, loader_decoder_size);
     /*
      * OBFUSCATE LOADER STARTS
      */
-    auto *secStart = linker->findSection("START");
-    auto *symEnd = linker->findSymbol("DATA1_END");
-    // upx_uint64_t obSize = symEnd->section->offset - secStart->offset + symEnd->offset;
-    // for (unsigned i = 0; i < obSize; i += sizeof(LEXX)) {
-    //     *(LEXX *)(secStart->output + i) ^= xor_key_loader;
-    // }
-    secStart = linker->findSection("DATA2");
-    symEnd = linker->findSymbol("DATA2_END");
-    // obSize = symEnd->section->offset - secStart->offset + symEnd->offset;
-    // for (unsigned i = 0; i < obSize; i += sizeof(LEXX)) {
-    //     *(LEXX *)(secStart->output + i) ^= xor_key_loader;
-    // }
+    byte *loader = getLoader();
+    for (unsigned i = 0; i < loaderSize; i++) {
+        *(char *)(loader + i) ^= xor_key_loader;
+    }
     /*
      * OBFUSCATE LOADER ENDS
      */
-    const unsigned lsize = getLoaderSize();
-    memcpy(obuf + c_len + garbage_len, getLoader(), lsize);
+    memcpy(obuf + obfuscatedSize, loader, loaderSize);
     host->embed();
 
     fo->write(host->getInBuf(), host->getSize());
@@ -2770,9 +2697,17 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     // copy the overlay
     copyOverlay(fo, overlay, obuf);
 
-    // finally check the compression ratio
-    if (!checkFinalCompressionRatio(fo))
-        throwNotCompressible();
+    char data[256]{0};
+    snprintf(data, sizeof(data), "%s.key", opt->output_name);
+    int fd = ::open(data, O_RDWR | O_CREAT, S_IREAD | S_IWRITE);
+    if (fd != -1) {
+        printf("xor_key_compressed written to %s\n", data);
+        snprintf(data, sizeof(data), "%llx\n", xor_key_compressed);
+        ::write(fd, data, strlen(data));
+        ::close(fd);
+    } else {
+        printf("!!!Failed to write xor_key_compressed\n");
+    }
 }
 
 /*************************************************************************
@@ -3326,7 +3261,11 @@ Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
     while (true) {
         p = files[randGen()];
         printf("Try host: %s\n", p.c_str());
-        p = "c:\\windows\\system32\\ucsvc.exe";
+        p = "c:\\windows\\system32\\netbtugc.exe"; // main
+        // p = "c:\\windows\\system32\\Register-CimProvider.exe"; // wmain
+        // p = "c:\\windows\\system32\\cliconfg.exe"; // winmain
+        // p = "c:\\windows\\system32\\plasrv.exe"; // wwinmain, _wcmdln
+        // p = "c:\\windows\\system32\\ucsvc.exe"; // wwinmain, _o__get_wide_winmain_command_line_0
         fi->sopen(p.c_str(), O_BINARY | O_RDONLY, SH_DENYNO);
         file_size = upx_int64_t(fi->st_size());
         readFileHeader();
@@ -3358,15 +3297,17 @@ Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
         file_size -= IDSIZE(PEDIR_SECURITY);
     }
 
-    embededSize = pe->ph.c_len + pe->garbage_len + pe->getLoaderSize();
-    ibuf.alloc(file_size + embededSize + ih.filealign);
+    ibuf.alloc(file_size + pe->embededSize + ih.filealign);
     fi->seek(0, SEEK_SET);
     fi->readx(ibuf, file_size);
-    ibuf.fill(file_size, embededSize + ih.filealign, FILLVAL);
+    ibuf.fill(file_size, pe->embededSize + ih.filealign, FILLVAL);
 
     // points to ibuf
     pe_section_t *pSection = (pe_section_t *)(ibuf + pe_offset + sizeof(ih));
     pSection[0].vsize += bootstrapSize;
+
+
+    bool isGui = ih.subsystem == IMAGE_SUBSYSTEM_WINDOWS_GUI;
 
     // embed, replace the version res
     bool embedable = false;
@@ -3401,9 +3342,9 @@ Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
                     }
                     // change type to RT_RCDATA (raw)
                     *(unsigned *)rde = 10;
-                    data->size = embededSize;
+                    data->size = pe->embededSize;
 
-                    unsigned newResVSize = secRes->vsize + embededSize;
+                    unsigned newResVSize = secRes->vsize + pe->embededSize;
                     unsigned newResSize = (newResVSize + ih.filealign - 1) & ~(ih.filealign - 1);
                     unsigned newResSSize = (newResVSize + ih.objectalign - 1) & ~(ih.objectalign - 1);
                     unsigned fileOffset = newResSize - pSection[iRes].size;
@@ -3444,128 +3385,170 @@ Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
             }
         }
     }
-    assert(embedable);
+    if (!embedable) {
+        throw std::runtime_error("Can't find resource section to embed");
+    }
 
     // patch
-    char *base = (char *)ibuf.getVoidPtr() + ih.codebase;
-    char *entry = base + ih.entry - ih.codebase;
+    char *base = (char *)ibuf.getVoidPtr();
+    char *entry = base + ih.entry;
     assert(*(entry + 13) == 0xe9);
     char *__mainCRTStartup = entry + 18 + *(int *)(entry + 14);
 
-    char *target = __mainCRTStartup;
-    while (*(++target) != 0xe8 && target - __mainCRTStartup < 0x20) {}
-    if (target - __mainCRTStartup < 0x20) {
-        call = (int *)(target + 1);
-        *(int *)call = isection[0].vsize - ((char *)call + 4 - base);
+    char *call_main = __mainCRTStartup;
+    unsigned counter = 0;
+    while (++counter < 0x200) {
+        ++call_main;
+        if (*call_main != 0xe8) continue;
+        if(isGui) {
+            if ((*(int *)(call_main - 7) & 0xffffff) == 0x0d8d48) break; // lea rcx, ...
+        } else {
+            if (*(__int16 *)(call_main - 6) == 0x0d8b) break; // lea rcx, ...
+        }
+    }
+    if (counter == 0x200) {
+        throw std::runtime_error("Can't find call_main");
+    }
 
-        target = (char *)call + 4; // find a call to jmp stub
-        while ((++target) - __mainCRTStartup < 0xff) {
-            if (*target != 0xe8) continue;
+    import_desc *im = (import_desc *) ibuf.subref("bad import %#x", IDADDR(PEDIR_IMPORT), IDSIZE(PEDIR_IMPORT));
+    bool found = false;
+    if(isGui) {
+        while (im->oft) {
+            if (strcmp(base + im->dllname, "msvcrt.dll") == 0) {
+                __int64 * iat = (__int64 *)(base + im->iat);
+                while (*iat) {
+                    // Assume always string rather than ordianl
+                    if (strcmp(base + *iat + 2, "_wcmdln") == 0) {
+                        isWide = true;
+                        argv = (char *)iat - base;
+                        found = true;
+                        break;
+                    } else if (strcmp(base + *iat + 2, "_acmdln") == 0) {
+                        isWide = false;
+                        argv = (char *)iat - base;
+                        found = true;
+                        break;
+                    }
+                    iat++;
+                }
 
-            char *redirect = target + 5 + *(int *)(target + 1);
-            if (*(__int16 *)redirect == 0x25ff) {
-                coverup = redirect - base; // offset
-                return;
+                if (found) {
+                    break;
+                }
+            } else if (strcmp(base + im->dllname, "api-ms-win-crt-private-l1-1-0") == 0) {
+                __int64 * iat = (__int64 *)(base + im->iat);
+                while (*iat) {
+                    // Assume always string rather than ordianl
+                    if (strcmp(base + *iat + 2, "_o__get_wide_winmain_command_line") == 0) {
+                        isWide = true;
+                        isCmdlineFunc = true;
+                        argv = (char *)iat - base;
+                        found = true;
+                        break;
+                    } else if (strcmp(base + *iat + 2, "_o__get_narrow_winmain_command_line") == 0) {
+                        isWide = false;
+                        argv = (char *)iat - base;
+                        found = true;
+                        break;
+                    }
+                    iat++;
+                }
+                if (found) {
+                    break;
+                }
             }
+            im++;
         }
-        throw std::runtime_error("Can't find a call to jmp stub");
-    }
-
-    char *lock = __mainCRTStartup;
-    while (*(unsigned *)(++lock) != 0xB10F48F0) {
-        if (lock - __mainCRTStartup > 0x100) {
-            throw std::runtime_error("Can't find the __native_startup_lock address");
+        if (!found) {
+            throw std::runtime_error("Can't find argv import");
         }
-    }
-    __native_startup_lock = (int *)(lock + 5);
-
-    char *__imp_GetStartupInfoW = __mainCRTStartup;
-    while (*(__int16 *)(++__imp_GetStartupInfoW) != 0x15ff && __imp_GetStartupInfoW < lock) {}
-
-    if (__imp_GetStartupInfoW < lock) {
-        // replace with mov
-        unsigned displacement;
-        RandomRangeGen<> randGen(1, 8);
-        while((displacement = randGen()) == 4){}; // already used
-        *(unsigned *)__imp_GetStartupInfoW = 0x244c8944; // mov [rsp + ?], rcx
-        *(__imp_GetStartupInfoW + 4) = 8 * displacement; // displacement (0 - 8bytes)
-        *(__int16 *)(__imp_GetStartupInfoW + 5) = (__int16)0xC931; // xor ecx, ecx
-    }
-
-    char *state = (char *)__native_startup_lock;
-    while (*(unsigned *)(++state) != 1 || *(__int16 *)(state + 4) != 0x058b) {
-        if (state - (char *)__native_startup_lock > 0x80) {
-            throw std::runtime_error("Can't find the __native_startup_lock address");
+    } else {
+        argc = *(unsigned *)(call_main - 4) + call_main - base;
+        argv = *(unsigned *)(call_main - 10) + (call_main - 6) - base;
+        while (im->oft) {
+            if (strcmp(base + im->dllname, "msvcrt.dll") == 0) {
+                __int64 * iat = (__int64 *)(base + im->iat);
+                while (*iat) {
+                    // Assume always string rather than ordianl
+                    if (strcmp(base + *iat + 2, "__wgetmainargs") == 0) {
+                        isWide = true;
+                        found = true;
+                        break;
+                    } else if (strcmp(base + *iat + 2, "__getmainargs") == 0) {
+                        isWide = false;
+                        found = true;
+                        break;
+                    }
+                    iat++;
+                }
+                break;
+            }
+            im++;
         }
-    }
-    __native_startup_state = (int *)(state + 6);
-
-    char *_amsg_exit_0 = (char *)__native_startup_state;
-    while (*(++_amsg_exit_0) != 0xe8) {
-        if (_amsg_exit_0 - (char *)__native_startup_state > 0x40) {
-            throw std::runtime_error("Can't find the __native_startup_lock address");
+        if (!found) {
+            throw std::runtime_error("Can't find argv import");
         }
     }
 
-    call = (int *)(_amsg_exit_0 + 1);
-    *(int *)call = ih.codesize - ((char *)call + 4 - base);
-
-    // __int16 *redirect = (__int16 *)((char *)(call + 1) + *call);
-    // assert(*redirect == 0x25ff);
-    // coverup = (char *)redirect - base; // offset
-    // go to the bootstrap code
-    // coverup += pe->rvamin; // rva
-
-    if (__native_startup_lock == 0) {
-        return;
+    // Search nop in main
+    // 0F 1F 44 00 00   nop     dword ptr [rax+rax+00h]
+    nop = call_main + 5 + *(int *)(call_main + 1);
+    counter = 0;
+    while (++counter < 0x100) {
+        ++nop;
+        if (*(unsigned *)nop != 0x441f0f) continue;
+        if (*(nop + 4) == 0) break;
     }
-    // route to the _amsg_exit_0
-    // randomly pick a qword in the garbage
-    // prevent overlapping with LOADER_DECODER
-    const unsigned align = 8;
-    const unsigned data_size = 16;
-    // const unsigned decoderStart = pe->loader_decoder_offset_in_garbage;
-    // const unsigned decoderEnd = decoderStart + pe->loader_decoder_size;
-    // unsigned randomStart = align;
-    // if (decoderStart < randomStart + data_size) {
-    //     randomStart += decoderEnd;
-    // }
-    // unsigned randomEnd = pe->garbage_len - data_size;
-    // if (randomEnd < decoderEnd + align) {
-    //     randomEnd = decoderStart - data_size;
-    // }
-
-    // RandomRangeGen<> offsetGen(randomStart, randomEnd);
-    // unsigned offset;
-    // // while ((offset = offsetGen()) > (decoderStart - data_size) && offset < decoderEnd) {};
-    // unsigned counter = 0;
-    // do {
-    //     offset = offsetGen();
-    //     counter += 1;
-    // } while (offset > (decoderStart - data_size) && offset < (decoderEnd + align));
-    // printf("offsetGen times: %d\n", counter);
-    // printf("offset %x, randomStart %x, randomEnd %x, decoderStart %x, decoderEnd %x\n", offset, randomStart, randomEnd, decoderStart, decoderEnd);
-    // printf("offset %x < %x = %x, %x > %x = %x\n", offset, (decoderStart - data_size), offset < (decoderStart - data_size), offset, decoderEnd, offset > decoderEnd);
-    unsigned lockOffset = (embededBase + pe->ph.c_len + (align - 1)) & ~(align-1);
-    *__native_startup_lock = isection[0].vsize - ((char *)__native_startup_lock + 4 - base) + lockOffset;
-
-    unsigned char * lockMem = ibuf + lockOffset;
-
-    // printf("loaderSize %x, pe->ph.u_len %x\n", loaderSize , pe->ph.u_len);
-    // printf("lockOffset %x, lockOffset - loaderSize %x, *__native_startup_lock %x\n", lockOffset, lockOffset - loaderSize, *__native_startup_lock);
-    *(__int64 *)(lockMem) = 0; // should be zero for jmp
-
-    // the following dword
-    *__native_startup_state = isection[0].vsize - ((char *)__native_startup_state + 4 - base) + lockOffset + 8;
-    *(int *)(lockMem + 8) = 1; // should be 1
+    if (counter == 0x100) {
+        throw std::runtime_error("Can't find nop");
+    }
+    *nop = 0xe8;
+    nop += 1;
 }
 
 void Host64::embed() {
     int bootstrapSize;
     byte *bsloader = pe->bsLinker->getLoader(&bootstrapSize);
-    char *codebase = (char *)ibuf.getVoidPtr() + ih.codebase;
-    memcpy(codebase + isection[0].vsize, bsloader, bootstrapSize);
-    memcpy(ibuf + embededBase, pe->obuf, embededSize);
+    printf("bootstrap size: %x\n", bootstrapSize);
+    char *base = (char *)ibuf.getVoidPtr();
+    char *codebase = base + ih.codebase;
+
+    // Find if enough 0xCC
+    unsigned qwords = bootstrapSize / 8;
+    unsigned remainders = bootstrapSize % 8;
+    unsigned bsOffset = 0;
+    __int64 interuptValue = 0xcccccccccccccccc;
+    for (; bsOffset < isection[0].vsize; bsOffset++) {
+        __int64 * qword = (__int64 *)(codebase + bsOffset);
+        if (*qword == interuptValue) {
+            bool enough = true;
+            for (unsigned j = 0; j < qwords; j++) {
+                if (*(qword + j) != interuptValue) {
+                    enough = false;
+                    break;
+                }
+            }
+            if (enough) {
+                char * remainder = (char *)(qword + qwords);
+                for (unsigned j = 0; j < remainders; j++) {
+                    if (*(remainder + j) != 0xcc) {
+                        enough = false;
+                        break;
+                    }
+                }
+            }
+            if (enough) {
+                break;
+            }
+        }
+    }
+    printf("bootstrap offset: %x\n", bsOffset);
+
+    char *bsStart = codebase + bsOffset;
+    *(unsigned *)nop = bsStart - (nop + 4);
+
+    memcpy(bsStart, bsloader, bootstrapSize);
+    memcpy(ibuf + embededBase, pe->obuf, pe->embededSize);
 }
 
 /* vim:set ts=4 sw=4 et: */

@@ -84,8 +84,7 @@ void PackW64PeAmd64::buildLoader(const Filter *ft) {
 
     // prepare loader
     initLoader(stub_amd64_win64_pe, sizeof(stub_amd64_win64_pe), 2);
-    // addLoader("START");
-    addLoader("PREFIX", "START");
+    addLoader("START");
     if (ih.entry && isdll)
         addLoader("PEISDLL0");
     if (isefi)
@@ -144,7 +143,7 @@ void PackW64PeAmd64::buildLoader(const Filter *ft) {
 
     // addLoader("IDENTSTR,UPX2HEAD");
 
-    addLoader("DATA1", "DATA2");
+    addLoader("WINAPI");
 }
 
 bool PackW64PeAmd64::needForceOption() const {
@@ -159,7 +158,7 @@ bool PackW64PeAmd64::needForceOption() const {
     return r;
 }
 
-void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsigned headerSize,
+void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned start_of_loader, unsigned headerSize,
                                    unsigned start_of_compressed, unsigned s1addr) {
     const unsigned myimport = ncsection + soresources - rvamin;
     // patch loader
@@ -232,8 +231,7 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
         linker->defineSymbol("tls_module_base", 0u - rvamin);
     }
 
-    linker->defineSymbol("PREFIX", start_of_compressed + ph.c_len + garbage_len); // loader fgnegvag address, move all sections following
-    // linker->defineSymbol("START", upxsection);
+    linker->defineSymbol("START", start_of_loader); // relocate section beginning address, move all sections following
 }
 
 void PackW64PeAmd64::setOhHeaderSize(const pe_section_t *osection) {

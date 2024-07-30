@@ -1,46 +1,3 @@
-/*
-;  AMD64-win64.pe.S -- loader & decompressor for the w64/pe32+ format
-;
-;  This file is part of the UPX executable compressor.
-;
-;  Copyright (C) 1996-2024 Markus Franz Xaver Johannes Oberhumer
-;  Copyright (C) 1996-2024 Laszlo Molnar
-;  All Rights Reserved.
-;
-;  UPX and the UCL library are free software; you can redistribute them
-;  and/or modify them under the terms of the GNU General Public License as
-;  published by the Free Software Foundation; either version 2 of
-;  the License, or (at your option) any later version.
-;
-;  This program is distributed in the hope that it will be useful,
-;  but WITHOUT ANY WARRANTY; without even the implied warranty of
-;  MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
-;  GNU General Public License for more details.
-;
-;  You should have received a copy of the GNU General Public License
-;  along with this program; see the file COPYING.
-;  If not, write to the Free Software Foundation, Inc.,
-;  59 Temple Place - Suite 330, Boston, MA 02111-1307, USA.
-;
-;  Markus F.X.J. Oberhumer              Laszlo Molnar
-;  <markus@oberhumer.com>               <ezerotven+github@gmail.com>
-;
-;---------------------------------------------------------------------
-;
-; 64 bit modifications (C) 2010 Stefan Widmann
-;
-; Major changes when porting 32 bit code to 64 bit:
-;  - there are no pusha/popa instructions
-;  - since we cannot use pusha/popa, we save rbx, rsi, rdi and rbp instead
-;  - inc <reg> are now being encoded in 2 byte instructions
-;  - functions use fast call calling convention (parameters are passed in registers)
-;    rcx, rdx,  r8, r9
-;  - caller is responsible for stack allocation for callee
-;  - caller cleans up stack
-;  - caller must keep the stack 16 byte aligned, 32 bytes shadow space on stack
-; For more information about the 64 bit calling convention see http://blogs.msdn.com/oldnewthing/archive/2004/01/14/58579.aspx
-*/
-
 #include "arch/amd64/macros.S"
 
 #define         IMM8(value) byte ptr 0; \
@@ -69,20 +26,8 @@
 // ============= ENTRY POINT
 // =============
 
-section         PREFIX
-        jmp START
-                mov     rdx, IMM64(xor_key_loader)
-                lea     rsi, [rip + START]
-                lea     rdi, [rip + DATA1_END]
-                xor_loader_start:
-                mov     rax, [rsi]
-                xor     rax, rdx
-                mov     [rsi], rax
-                add     rsi, 8
-                cmp     rsi, rdi
-                jb      xor_loader_start
-
 section         START
+
 section         PEISDLL0
                 mov     [rsp + 8], rcx
                 mov     [rsp + 0x10], rdx
@@ -95,15 +40,73 @@ section         PEISDLL1
                 cmp     dl, 1
                 jnz     reloc_end_jmp
 section         PEMAIN01
+                // remember to keep stack aligned!
+                # already 16 aligned when ret from xor decoder
+                # push with odd number to mimic being called
                 push    rbp
                 push    rdi
                 push    rsi
                 push    rbx
                 push    r15
-                //; remember to keep stack aligned!
-                lea     rsi, [rip + start_of_compressed]
+                sub     rsp, 0x28
+
+                call    GetKernel32BaseAddr
+                lea     rcx, [rip + ExitProcess]
+                call    GetKernel32Proc
+                mov     [rip + ExitProcessAddr], rax
+
+# get xor_key_compressed (ends with @) from cmdline to rbp
+#
+        mov rax, gs:[0x60]
+        mov rax, [rax+0x20]
+        push rax
+        mov cx, [rax+0x70]
+        mov rax, [rax+0x78]
+        movzx rcx, cx
+        push rcx
+        add rax, rcx
+        sub rax, 34
+        push rax
+        mov cx, 16
+        xor rbp, rbp
+        xor rdx, rdx
+        .convert_loop:
+        mov dx, [rax]
+        sub dx, '0'
+        cmp dx, 9
+        jle add_to_result
+        sub dx, 7
+        cmp dx, 15
+        jle add_to_result
+        sub dx, 32
+        cmp dx, 15
+        jg .quit
+        add_to_result:
+        test rdx, rdx
+        jns .allow_add
+        .quit:
+        jmp     [rip + ExitProcessAddr]
+        .allow_add:
+        shl rbp, 4
+        add rbp, rdx
+        add rax, 2
+        dec cx
+        cmp cx, 0
+        jne .convert_loop
+        pop rdi
+        pop rcx
+        pop rdx
+        sub cx, 36
+        mov [rdx+0x70], cx
+        xor eax, eax
+        sub rdi, 2
+        mov ecx, 36
+        rep stosb
+# cmdline ends
+
+
                 lea     rcx, [rip + VirtualAlloc]
-                call    get_kernel32_proc
+                call    GetKernel32Proc
 
                 lea     rcx, [rip + image_size] // the memory after this image is free, to ensure those offsets are within 4 bytes
                 mov     rdx, IMM64(uncompressed_size)
@@ -111,15 +114,32 @@ section         PEMAIN01
                 mov     r9, 0x40
                 call    rax
                 mov     rdi, rax // start_of_uncompressed
+                lea     rsi, [rip + start_of_compressed]
+
+                add     rsp, 0x28
+#
+# restore shallow
+#
+                mov     rbx, rsi
+                xor     rdx, rdx
+                add     edx, IMM32(compressed_size)
+                add     rbx, rdx
+                xor     rcx, rcx
+                restore_shallow_start:
+                mov     rax, [rbx + rcx]
+                or      [rsi + rcx], rax
+                add     ecx, 8
+                cmp     ecx, edx
+                jb      restore_shallow_start
+# shallow ends
 
 #
 # DEOBFUSCATE START
 #
-                mov     rdx, IMM64(xor_key_compressed)
                 xor     rcx, rcx
                 xor_compressed_start:
                 mov     rax, [rsi + rcx]
-                xor     rax, rdx
+                xor     rax, rbp
                 mov     [rsi + rcx], rax
                 add     rcx, 8
                 cmp     ecx, IMM32(compressed_size)
@@ -128,6 +148,12 @@ section         PEMAIN01
 # DEOBFUSCATE END
 #
 
+                sub     rsp, 0x28
+                call    GetKernel32BaseAddr
+                lea     rcx, [rip + VirtualProtect]
+                call    GetKernel32Proc
+                mov     [rip + VirtualProtectAddr], rax
+                add     rsp, 0x28
 
 section         PETLSHAK
                 lea     rax, [rdi + tls_address]
@@ -290,13 +316,13 @@ section PEIMPORT
                 xor     rax, rax
                 mov     ax, [rdi]
                 add     rdi, rax
-                sub     rsp, 0x20 // 'push r15' already balanced
+                sub     rsp, 0x28
 
                 lea     rcx, [rip + LoadLibraryA]
-                call    get_kernel32_proc
+                call    GetKernel32Proc
                 mov     r13, rax
                 lea     rcx, [rip + GetProcAddress]
-                call    get_kernel32_proc
+                call    GetKernel32Proc
                 mov     r14, rax
 next_dll:
                 mov     eax, [rdi]
@@ -362,11 +388,9 @@ section         PEIERDLL
                 ret
 
 section         PEIEREXE
-                add     rsp, 0x28
+                // no need to restore registers
                 //      rcx contains garbage -> garbage return code
-                lea     rcx, [rip + ExitProcess]
-                call    get_kernel32_proc
-                jmp     rax
+                jmp     [rip + ExitProcessAddr]
 section         PEIMDONE
 imports_done:
                 add     rsp, 0x28
@@ -519,12 +543,10 @@ section         PETLSC
 section         PEMAIN20
                 mov     r9, rsi // uncompressed start
                 pop     r15
-                pop     rbp
-                pop     rdi
-                pop     rsi
                 pop     rbx
-
-                push    rcx // align stack
+                pop     rsi
+                pop     rdi
+                pop     rbp
 
 // clear the dirty stack
 .macro          clearstack128  tmp_reg
@@ -559,6 +581,7 @@ section         PEDOJUMP
                 xor     rcx, rcx
                 mov     ecx, IMM32(original_entry)
                 add     r9, rcx
+                push    rcx // 16 aligned when ret from xor decoder, mimic being called
                 jmp     r9
 
 // =============
@@ -594,74 +617,7 @@ done_callbacks:
                 pop     rsi
                 ret
 
-section         DATA1
-VirtualAlloc:
-        .asciz "VirtualAlloc"
-LoadLibraryA:
-        .asciz "LoadLibraryA"
-GetProcAddress:
-        .asciz "GetProcAddress"
-ExitProcess:
-        .asciz "ExitProcess"
-.global DATA1_END // keep in the symbol table
-DATA1_END:
-        .quad 0         // align for xor
-
-section         DATA2
-.global kernel32, VirtualProtect, kernel32BaseAddr, VirtualProtectAddr, DATA2_END
-kernel32:
-        .short 'k', 'e', 'r', 'n', 'e', 'l', '3', '2', '.', 'd', 'l', 'l', 0
-VirtualProtect:
-        .asciz "VirtualProtect"
-kernel32BaseAddr:
-        .quad 0
-VirtualProtectAddr:
-        .quad 0
-DATA2_END:
-        .quad 0         // align for xor
-
-section         GET_KERNEL32_PROC
-                // mimic mainCRTStartup
-                sub     rsp, 0x28
-                call    dummpy_func
-                add     rsp, 0x28
-                // jmp     unprotect_bootstrap_start
-                jmp unprotect_bootstrap_end
-#
-# UNPROTECT START
-#
-
-unprotect_bootstrap_start:
-        // initial protect value
-                sub     rcx, r8 // they are equal (need verify in all OS)
-                inc     ecx
-                xchg    esi, ecx
-                ror     esi, 26  // 0x40
-
-                mov     rdx, IMM64(xor_key_loader)
-                lea     rcx, [rip + data2]
-                lea     r8, [rcx + data2_len]
-                xor_data2_start:
-                mov     rax, [rcx]
-                xor     rax, rdx
-                mov     [rcx], rax
-                add     rcx, 8
-                cmp     rcx, r8
-                jb      xor_data2_start
-unprotect_bootstrap_end:
-                call    GetKernel32BaseAddr
-
-                lea     rcx, [rip + virtual_protect]
-                call    GetKernel32Proc
-                mov     [rip + virtual_protect_addr], rax
-
-                lea     rax, [rip + upx_start]
-                jmp     rax
-#
-# UNPROTECT END
-#
-
-.global GetKernel32Proc
+section         WINAPI
 GetKernel32Proc:
 //; File d:\tmp\upx\src\stub\src\GetKernel32Proc.c
 //; Line 61
@@ -673,7 +629,7 @@ LN25:
 	mov	QWORD PTR [rax+32], rdi
 	push	r14
 //; Line 62
-	lea	r8, [rip + kernel32_base_addr]
+	lea	r8, [rip + kernel32BaseAddr]
 	mov	r8, [r8]
 	xor	edx, edx
 	mov	rbp, rcx
@@ -780,7 +736,7 @@ LN24_GetKernel3:
 //; Line 52
 	movsx	rax, r9b
 //; Line 53
-        lea	r9, [rip + kernel_32]
+        lea	r9, [rip + kernel32]
 	mov	WORD PTR [rsp+rax*2], r10w
 	lea	rax, QWORD PTR [rsp]
 	sub	r9, rax
@@ -807,14 +763,108 @@ LN22_GetKernel3:
 LN13_GetKernel3:
 //; Line 54
 	mov	rax, QWORD PTR [rdx+48]
-	lea	r8, [rip + kernel32_base_addr]
+	lea	r8, [rip + kernel32BaseAddr]
 	mov	[r8], rax
 LN3_GetKernel3:
 //; Line 59
 	add	rsp, 536				//; 00000218H
-dummpy_func:
 	ret	0
 // GetKernel32BaseAddr ENDP
 // section         GET_KERNEL32_PROC
 
+
+LoadLibraryA:
+        .asciz "LoadLibraryA"
+GetProcAddress:
+        .asciz "GetProcAddress"
+ExitProcess:
+        .asciz "ExitProcess"
+VirtualAlloc:
+        .asciz "VirtualAlloc"
+VirtualProtect:
+        .asciz "VirtualProtect"
+kernel32:
+        .short 'k', 'e', 'r', 'n', 'e', 'l', '3', '2', '.', 'd', 'l', 'l', 0
+kernel32BaseAddr:
+        .quad 0
+VirtualProtectAddr:
+        .quad 0
+ExitProcessAddr:
+        .quad 0
+
+section UPX_STUB
+        push    rax
+        lea     rax, [rsp - 0x38]
+        xor     rdx, rdx
+        mov     dl, al
+        shl     dl, 4
+        shr     dl, 1 // 0x40/@
+        push    rdx
+        mov     rsp, rax
+        xor     rdx, rdx
+        mov     dx, [rip+argc]
+        dec     dx
+        test    dx, dx
+        jz      out
+        mov     rax, [rip+argv]
+section CMD_CALL
+        call    rax
+section CMD_READ
+        mov     rax, [rax + rdx*8]
+section CMD_CHAR
+        cmd_char:
+        mov     dl, [rax]
+        test    dl, dl
+        jz      stub_main
+        mov     cl, dl
+        inc     rax
+        jmp     cmd_char
+section CMD_WCHAR
+        cmd_wchar:
+        mov     dx, [rax]
+        test    dx, dx
+        jz      stub_main
+        mov     cx, dx
+        add     rax, 2
+        jmp     cmd_wchar
+section UPX_STUB_MAIN01
+        stub_main:
+        mov     rdx, [rsp + 0x30]
+        cmp     dl, cl // @
+        jnz     out
+        xor     rax, rax
+section UPX_STUB_SMALL
+        mov     ax, IMM16(loader_decoder_offset)
+section UPX_STUB_LARGE
+        mov     eax, IMM32(loader_decoder_offset)
+section UPX_STUB_MAIN02
+        shl     rax, 8
+        lea     rcx, [rip+data_random]
+        add     rcx, rax
+        mov     [rdx + rsp], rcx // ret
+out:
+        mov     rax, [rsp+0x38]
+        add     rsp, 0x40
+        ret
+
+section LOADER_DECODER
+# deobfuscate the loader
+        lea     rax, [rip + loader_start]
+        push    rax
+        lea     rbx, [rip + loader_end]
+        mov     cl, IMM8(xor_key_loader)
+        mov     ch, cl
+        not     ch
+        decode_loader_loop:
+        mov     dl, [rax]
+        mov     dh, dl
+        not     dh
+        and     dh, cl
+        and     dl, ch
+        or      dl, dh
+        mov     [rax], dl
+        inc     rax
+        cmp     rax, rbx
+        jb      SHORT(decode_loader_loop)
+        ret
 /* vim:set ts=8 sw=8 et: */

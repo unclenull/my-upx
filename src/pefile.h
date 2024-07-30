@@ -43,6 +43,9 @@ class PeFile : public Packer {
 public:
     virtual int getVersion() const override { return 13; }
     unsigned garbage_len;
+    unsigned embededSize;
+    int loader_decoder_size;
+    unsigned loader_decoder_offset_in_garbage;
     Linker *bsLinker;
     unsigned rvamin;
 protected:
@@ -669,6 +672,11 @@ public:
     unsigned embededBase;
     unsigned embededVBase;
     unsigned embededSize;
+    unsigned argc = 0;
+    unsigned argv;
+    bool isWide;
+    bool isCmdlineFunc = false;
+    char *nop;
     virtual MemBuffer& getInBuf() = 0;
     virtual SPAN_0(PeFile::pe_section_t) getOldSection() = 0;
     virtual unsigned getSize() = 0;
@@ -748,4 +756,5 @@ public:
     };
 };
 #define RandomByte() RandomRangeGen<unsigned>(0, 255)()
+#define RandomRange(start, end) RandomRangeGen<unsigned>(start, end)()
 /* vim:set ts=4 sw=4 et: */
