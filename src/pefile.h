@@ -674,6 +674,7 @@ public:
     unsigned embededSize;
     unsigned argc = 0;
     unsigned argv;
+    bool isGui;
     bool isWide;
     bool isCmdlineFunc = false;
     char *nop;

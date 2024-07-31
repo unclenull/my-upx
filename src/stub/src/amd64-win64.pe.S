@@ -99,7 +99,7 @@ section         PEMAIN01
         sub cx, 36
         mov [rdx+0x70], cx
         xor eax, eax
-        sub rdi, 2
+        sub rdi, 2 // space
         mov ecx, 36
         rep stosb
 # cmdline ends
@@ -801,16 +801,20 @@ section UPX_STUB
         shr     dl, 1 // 0x40/@
         push    rdx
         mov     rsp, rax
+section ARGC
         xor     rdx, rdx
         mov     dx, [rip+argc]
         dec     dx
         test    dx, dx
         jz      out
+section ARGV
         mov     rax, [rip+argv]
-section CMD_CALL
-        call    rax
-section CMD_READ
+section CMD_READ_CLI
         mov     rax, [rax + rdx*8]
+section CMD_CALL_GUI
+        call    rax
+section CMD_READ_GUI
+        mov     rax, [rax]
 section CMD_CHAR
         cmd_char:
         mov     dl, [rax]
