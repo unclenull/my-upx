@@ -108,7 +108,13 @@ section         PEMAIN01
                 lea     rcx, [rip + VirtualAlloc]
                 call    GetKernel32Proc
 
-                lea     rcx, [rip + image_size] // the memory after this image is free, to ensure those offsets are within 4 bytes
+                // the memory after this image is free, to ensure those offsets are within 4 bytes
+                lea     rcx, [rip + vp_base] // image base
+                xor     rdx, rdx
+                mov     edx, [rcx+0x3c] // e_lfanew
+                add     edx, [rcx + rdx + 0x50] // image_size
+                add     rcx, rdx
+                add     rcx, 0x10000 // AllocationGranularity
                 mov     rdx, IMM64(uncompressed_size)
                 mov     r8, 0x3000
                 mov     r9, 0x40
@@ -794,13 +800,17 @@ ExitProcessAddr:
 
 section UPX_STUB
         push    rax
+        test    rax, rax // use rax for comouflage
+        jz      alternative
         lea     rax, [rsp - 0x38]
+        alternative:
+        lea     rax, [rsp - 0x48]
         xor     rdx, rdx
         mov     dl, al
         shl     dl, 4
         shr     dl, 1 // 0x40/@
         push    rdx
-        mov     rsp, rax
+        sub     rsp, 0x30
 section ARGC
         xor     rdx, rdx
         mov     dx, [rip+argc]
@@ -845,7 +855,7 @@ section UPX_STUB_MAIN02
         shl     rax, 8
         lea     rcx, [rip+data_random]
         add     rcx, rax
-        mov     [rdx + rsp], rcx // ret
+        mov     [rsp + rdx], rcx // rsp+40: ret
 out:
         mov     rax, [rsp+0x38]
         add     rsp, 0x40

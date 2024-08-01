@@ -668,6 +668,7 @@ public:
 
 class Host {
 public:
+    const unsigned maxBootstrapSize = 0x90;
     unsigned coverup = 0;
     unsigned embededBase;
     unsigned embededVBase;
@@ -677,7 +678,11 @@ public:
     bool isGui;
     bool isWide;
     bool isCmdlineFunc = false;
-    char *nop;
+    char *main;
+    PeFile::pe_section_t *pSection;
+
+    bool Host::replaceNops(char *start, char *bsStart);
+
     virtual MemBuffer& getInBuf() = 0;
     virtual SPAN_0(PeFile::pe_section_t) getOldSection() = 0;
     virtual unsigned getSize() = 0;
