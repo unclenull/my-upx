@@ -259,6 +259,7 @@ section         LZMA_TAIL
 // =============
 section         PEMAIN10
                 pop     rsi             // load vaddr
+                add     rsi, IMM16(rvamin)
 
 section         PETLSHAK2               // restore the TLS index
                 pop     rdi

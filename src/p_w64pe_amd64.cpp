@@ -164,6 +164,7 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
     const unsigned myimport = ncsection + soresources - rvamin;
     // patch loader
     // linker->defineSymbol("original_entry", ih.entry + (uncompressedSection - rvamin));
+    linker->defineSymbol("rvamin", rvamin);
     linker->defineSymbol("original_entry", ih.entry - rvamin);
     // if (use_dep_hack) {
     //     // This works around a "protection" introduced in MSVCRT80, which
