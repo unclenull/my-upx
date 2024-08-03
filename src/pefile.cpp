@@ -2297,7 +2297,7 @@ unsigned PeFile::readSections(unsigned objs, unsigned usize, unsigned ih_fileali
     // Interval holes(ibuf);
 
     unsigned ic, jc, overlaystart = 0;
-    ibuf.clear(0, usize);
+    ibuf.clear(rvamin, usize);
     for (ic = jc = 0; ic < objs; ic++) {
         if (isection[ic].rawdataptr && overlaystart < isection[ic].rawdataptr + isection[ic].size)
             overlaystart = ALIGN_UP(isection[ic].rawdataptr + isection[ic].size, ih_filealign);
@@ -2332,7 +2332,7 @@ unsigned PeFile::readSections(unsigned objs, unsigned usize, unsigned ih_fileali
 }
 
 void PeFile::callCompressWithFilters(Filter &ft, int filter_strategy, unsigned ih_codebase) {
-    compressWithFilters(&ft, 2048, NULL_cconf, filter_strategy, ih_codebase, rvamin, 0, nullptr, 0);
+    compressWithFilters(&ft, 2048, NULL_cconf, filter_strategy, ih_codebase, 0, 0, nullptr, 0);
 }
 
 void PeFile::callProcessStubRelocs(Reloc &rel, unsigned &ic) {
@@ -2487,7 +2487,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         snprintf(buf, sizeof(buf), "bad PE header  ph.u_len=%#x  rvamin=%#x", ph.u_len, rvamin);
         throwInternalError(buf);
     }
-    ph.u_len -= rvamin;
+    // ph.u_len -= rvamin;
     // prepare filter
     Filter ft(ph.level);
     ft.buf_len = ih.codesize;
