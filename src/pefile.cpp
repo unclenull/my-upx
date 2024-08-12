@@ -2523,25 +2523,9 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
     callCompressWithFilters(ft, filter_strategy, ih.codebase);
 
-
-    // prepare bootstrap
-    Linker *bsLinker = newLinker();
-    bsLinker->init(stub_amd64_win64_pe, sizeof(stub_amd64_win64_pe));
-    bsLinker->addLoader("GET_KERNEL32_PROC");
-    int bssize;
-    byte *bsloader = bsLinker->getLoader(&bssize);
-
     /*
      * OBFUSCATE COMPRESSED STARTS
      */
-    srand(time(NULL));
-    LEXX xor_key_compressed = generateXorKey<LEXX>();
-    byte *obufStart = (byte *)obuf.getVoidPtr();
-    for (unsigned i = 0; i < ph.c_len; i += sizeof(LEXX)) {
-        *(LEXX *)(obufStart + i) ^= xor_key_compressed;
-    }
-    linker->defineSymbol("xor_key_compressed", xor_key_compressed);
-    linker->defineSymbol("compressed_size", ph.c_len);
 
     // garbage of max of 10% of the compressed size and within 10k (20 sectors)
     int maxSectors = ph.c_len / 10 / 512;
@@ -2551,16 +2535,18 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     srand(time(NULL));
     int garbageBytes = 512 * (rand() % maxSectors + 1); // at least 1
 
-    byte *garbageStart = obufStart + ph.c_len;
+    byte *garbageStart = (byte *)obuf.getVoidPtr() + ph.c_len;
     for (int i = 0; i < garbageBytes; i++) {
         garbageStart[i] = rand() % 256;
     }
-    printf("xor_key_compressed: 0x%llx\n", (upx_uint64_t)xor_key_compressed);
     printf("compressed_size: 0x%x\n", ph.c_len);
     printf("garbage bytes: 0x%x\n", garbageBytes);
-    /*
-     * OBFUSCATE COMPRESSED ENDS
-     */
+    // prepare bootstrap
+    Linker *bsLinker = newLinker();
+    bsLinker->init(stub_amd64_win64_pe, sizeof(stub_amd64_win64_pe));
+    bsLinker->addLoader("BOOTSTRAP");
+    int bssize;
+    byte *bsloader = bsLinker->getLoader(&bssize);
 
     // info: see buildLoader()
     newvsize = (ph.u_len + rvamin + ph.overlap_overhead + oam1) & ~oam1;
@@ -2723,7 +2709,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     }
 
     osection[0].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_EXECUTE;
-    osection[1].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE;
+    osection[1].flags = IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_MEM_READ | IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE;
 
     if (last_section_rsrc_only) {
         strcpy(osection[4].name, ".rsrc");
@@ -2745,13 +2731,10 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         ODSIZE(PEDIR_RESOURCE) = 0;
         ODADDR(PEDIR_EXCEPTION) = 0;
         ODSIZE(PEDIR_EXCEPTION) = 0;
-        size_t dirTable = pe_offset + offsetof(ht, ddirs);
-        linker->defineSymbol("dir_table", dirTable);
         linker->defineSymbol("res_vaddr", IDADDR(PEDIR_RESOURCE) - ih.codebase);
         linker->defineSymbol("res_size", IDSIZE(PEDIR_RESOURCE));
         linker->defineSymbol("exc_vaddr", IDADDR(PEDIR_EXCEPTION) - ih.codebase);
         linker->defineSymbol("exc_size", IDSIZE(PEDIR_EXCEPTION));
-        linker->defineSymbol("image_size", oh.imagesize + 0x10000); // AllocationGranularity
     }
 
     oh.datasize = osection[1].vsize + (has_ncsection ? osection[2].vsize : 0);
@@ -2768,33 +2751,14 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         oh.flags |= IMAGE_FILE_RELOCS_STRIPPED;
 
 
-    defineSymbols(ncsection, upxsection, 0, 0, s1addr);
+    defineSymbols(ncsection, 0, 0, 0, s1addr);
     defineFilterSymbols(&ft);
-
-    LEXX xor_key_loader = generateXorKey<LEXX>();
-    linker->defineSymbol("xor_key_loader", xor_key_loader);
-    printf("xor_key_loader: 0x%llx\n", (upx_uint64_t)xor_key_loader);
 
     /*
     * prepare bootstrap starts
     */
-    bsLinker->defineSymbol("GET_KERNEL32_PROC", rvamin); // relocate the section start address
-    bsLinker->defineSymbol("xor_key_loader", xor_key_loader);
-    bsLinker->defineSymbol("upx_start", upxsection + 0x40); // 0x40 for obfuscation
-    bsLinker->defineSymbol("data_section", osection[1].vaddr);
-    bsLinker->defineSymbol("data_section_size", osection[1].vsize);
-    auto *symDATA2 = linker->findSymbol("DATA2");
-    bsLinker->defineSymbol("data2", symDATA2->section->offset + symDATA2->offset);
-    auto *symDATA2_END = linker->findSymbol("DATA2_END");
-    bsLinker->defineSymbol("data2_len", symDATA2_END->offset + symDATA2->offset);
-    auto *sym = linker->findSymbol("kernel32");
-    bsLinker->defineSymbol("kernel_32", sym->section->offset + sym->offset);
-    sym = linker->findSymbol("VirtualProtect");
-    bsLinker->defineSymbol("virtual_protect", sym->section->offset + sym->offset);
-    sym = linker->findSymbol("kernel32BaseAddr");
-    bsLinker->defineSymbol("kernel32_base_addr", sym->section->offset + sym->offset);
-    sym = linker->findSymbol("VirtualProtectAddr");
-    bsLinker->defineSymbol("virtual_protect_addr", sym->section->offset + sym->offset);
+    bsLinker->defineSymbol("BOOTSTRAP", rvamin); // relocate the section start address
+    bsLinker->defineSymbol("upx_start", s1addr + 0x40); // 0x40 for obfuscation
     bsLinker->relocate();
     MemBuffer bootstrap(bssize);
     memcpy(bootstrap, bsloader, bssize);
@@ -2802,31 +2766,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     * prepare bootstrap ends
     */
 
-
-    sym = bsLinker->findSymbol("GetKernel32Proc");
-    linker->defineSymbol("get_kernel32_proc", sym->section->offset + sym->offset);
     relocateLoader();
-    /*
-     * OBFUSCATE LOADER STARTS
-     */
-    auto *secStart = linker->findSection("START");
-    auto *symEnd = linker->findSymbol("DATA1_END");
-    upx_uint64_t obSize = symEnd->section->offset - secStart->offset + symEnd->offset;
-    for (unsigned i = 0; i < obSize; i += sizeof(LEXX)) {
-        *(LEXX *)(secStart->output + i) ^= xor_key_loader;
-    }
-    secStart = linker->findSection("DATA2");
-    symEnd = linker->findSymbol("DATA2_END");
-    obSize = symEnd->section->offset - secStart->offset + symEnd->offset;
-    for (unsigned i = 0; i < obSize; i += sizeof(LEXX)) {
-        *(LEXX *)(secStart->output + i) ^= xor_key_loader;
-    }
-    /*
-     * OBFUSCATE LOADER ENDS
-     */
-    const unsigned lsize = getLoaderSize();
-    MemBuffer loader(lsize);
-    memcpy(loader, getLoader(), lsize);
 
 
     ibuf.clear(0, oh.filealign);
@@ -2834,7 +2774,10 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     info("Image size change: %u -> %u KiB", ih.imagesize / 1024, oh.imagesize / 1024);
 
     infoHeader("[Writing compressed file]");
+    fo->write(getLoader(), codesize);
+    fo->write(obuf, c_len + garbageBytes);
 
+    /*
     // write loader + compressed file
     fo->write(&oh, sizeof(oh));
     fo->write(osection, sizeof(osection[1]) * oobjs);
@@ -2845,12 +2788,10 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
         fo->write(ibuf, oh.filealign - ic);
 
     // fo->write(obuf, c_len);
+    fo->write(getLoader(), codesize);
+    infoWriting("loader", codesize);
     fo->write(obuf, c_len + garbageBytes);
     infoWriting("compressed data", c_len);
-    fo->write(loader, codesize);
-    infoWriting("loader", codesize);
-    if (opt->debug.dump_stub_loader)
-        OutputFile::dump(opt->debug.dump_stub_loader, loader, codesize);
     if ((ic = fo->getBytesWritten() & (sizeof(LEXX) - 1)) != 0)
         fo->write(ibuf, sizeof(LEXX) - ic);
     fo->write(otls, aligned_sotls);
@@ -2867,12 +2808,8 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
     if ((ic = fo->getBytesWritten() & fam1) != 0)
         fo->write(ibuf, oh.filealign - ic);
+    */
 
-    if (last_section_rsrc_only) {
-        fo->write(oresources, soresources);
-        if ((ic = fo->getBytesWritten() & fam1) != 0)
-            fo->write(ibuf, oh.filealign - ic);
-    }
 
 #if 0
     printf("%-13s: program hdr  : %8d bytes\n", getName(), (int) sizeof(oh));
@@ -2893,8 +2830,6 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     // verify
     // verifyOverlappingDecompression();
 
-    // copy the overlay
-    copyOverlay(fo, overlay, obuf);
 
     // finally check the compression ratio
     if (!checkFinalCompressionRatio(fo))

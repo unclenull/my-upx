@@ -69,19 +69,6 @@
 // ============= ENTRY POINT
 // =============
 
-section         PREFIX
-        // jmp START
-                mov     rdx, IMM64(xor_key_loader)
-                lea     rsi, [rip + START]
-                lea     rdi, [rip + DATA1_END]
-                xor_loader_start:
-                mov     rax, [rsi]
-                xor     rax, rdx
-                mov     [rsi], rax
-                add     rsi, 8
-                cmp     rsi, rdi
-                jb      xor_loader_start
-
 section         START
 section         PEISDLL0
                 mov     [rsp + 8], rcx
@@ -101,33 +88,23 @@ section         PEMAIN01
                 push    rbx
                 push    r15
                 //; remember to keep stack aligned!
-                lea     rsi, [rip + start_of_compressed]
+                call    GetKernel32BaseAddr
                 lea     rcx, [rip + VirtualAlloc]
-                call    get_kernel32_proc
-
-                lea     rcx, [rip + image_size] // the memory after this image is free, to ensure those offsets are within 4 bytes
+                call    GetKernel32Proc
+                // the memory after this image is free, to ensure those offsets are within 4 bytes
+                mov rcx, gs:[0x60]
+                mov rcx, [rcx+0x10] // imageBase
+                xor     rdx, rdx
+                mov     edx, [rcx+0x3c] // e_lfanew
+                mov     edx, [rcx + rdx + 0x50] // image_size
+                add     rcx, rdx
+                add     rcx, 0x10000 // AllocationGranularity
                 mov     rdx, IMM64(uncompressed_size)
                 mov     r8, 0x3000
                 mov     r9, 0x40
                 call    rax
                 mov     rdi, rax // start_of_uncompressed
-
-#
-# DEOBFUSCATE START
-#
-                mov     rdx, IMM64(xor_key_compressed)
-                xor     rcx, rcx
-                xor_compressed_start:
-                mov     rax, [rsi + rcx]
-                xor     rax, rdx
-                mov     [rsi + rcx], rax
-                add     rcx, 8
-                cmp     ecx, IMM32(compressed_size)
-                jb      xor_compressed_start
-
-# DEOBFUSCATE END
-#
-
+                lea     rsi, [rip + COMPRESSED_START] // start_of_compressed
 
 section         PEICONS1
                 incw    [rdi + icon_offset]
@@ -298,10 +275,10 @@ section PEIMPORT
                 sub     rsp, 0x20 // 'push r15' already balanced
 
                 lea     rcx, [rip + LoadLibraryA]
-                call    get_kernel32_proc
+                call    GetKernel32Proc
                 mov     r13, rax
                 lea     rcx, [rip + GetProcAddress]
-                call    get_kernel32_proc
+                call    GetKernel32Proc
                 mov     r14, rax
 next_dll:
                 mov     eax, [rdi]
@@ -370,7 +347,7 @@ section         PEIEREXE
                 add     rsp, 0x28
                 //      rcx contains garbage -> garbage return code
                 lea     rcx, [rip + ExitProcess]
-                call    get_kernel32_proc
+                call    GetKernel32Proc
                 jmp     rax
 section         PEIMDONE
 imports_done:
@@ -387,7 +364,8 @@ section         PERELOC2
 section         PERELOC3
                 lea     rbx, [rsi - 4]
                 xor     rcx, rcx // is_32bits
-                lea     rax, [rip + vp_base]
+                mov rax, gs:[0x60]
+                mov rax, [rax+0x10] // imageBase
                 mov     r9, rsi
                 sub     r9, rax // (uncompressed base - image base)
 
@@ -467,24 +445,33 @@ relhi0:
 
 // =============
 section         PEDEPHAK
-                lea     rdi, [rip + vp_base]
-                mov     ebx, IMM32(vp_size)     // 0x1000 or 0x2000
+                lea     rcx, [rip + VirtualProtect]
+                call    GetKernel32Proc
+                mov     r15, rax
+
+                mov rax, gs:[0x60]
+                mov rdi, [rax+0x10] // imageBase
+                // mov     ebx, IMM32(vp_size)     // 0x1000 or 0x2000
+                // TODO: read on the fly (when 0x2000?)
 
                 push    rax                     // provide 8 bytes stack
                 mov     r9, rsp
 // FIXME        push    4; pop     r8
                 mov     r8d, 4                  // PAGE_READWRITE
-                mov     rdx, rbx                // size
+                mov     rdx, 0x1000                // size
                 mov     rcx, rdi                // address
 
                 sub     rsp, 0x20
-                call    [rip + VirtualProtectAddr]                     // VirtualProtect
+                call    r15
 
                 mov     rcx, rsi
                 sub     rcx, rdi // add to (uncompressed base - image base)
                 mov     rdx, IMM64(uncompressed_size)
                 add     rdx, rcx
-                lea     rax, [rdi + dir_table]
+
+                xor     rax, rax
+                mov     eax, [rdi+0x3c] // e_lfanew
+                lea     rax, [rdi + rax + 0x88] // dir_table
                 mov     [rax + -0x38], edx // new image size, FindResource will check this
                 xor     rdx, rdx
                 mov     edx, IMM32(res_vaddr)
@@ -501,7 +488,7 @@ section         PEDEPHAK
                 mov     rdx, rbx
                 mov     rcx, rdi
 
-                call    [rip + VirtualProtectAddr]
+                call    r15
                 add     rsp, 0x28
 
 // =============
@@ -599,87 +586,8 @@ done_callbacks:
                 pop     rsi
                 ret
 
-section         DATA1
-VirtualAlloc:
-        .asciz "VirtualAlloc"
-LoadLibraryA:
-        .asciz "LoadLibraryA"
-GetProcAddress:
-        .asciz "GetProcAddress"
-ExitProcess:
-        .asciz "ExitProcess"
-.global DATA1_END // keep in the symbol table
-DATA1_END:
-        .quad 0         // align for xor
-
-section         DATA2
-.global kernel32, VirtualProtect, kernel32BaseAddr, VirtualProtectAddr, DATA2_END
-kernel32:
-        .short 'k', 'e', 'r', 'n', 'e', 'l', '3', '2', '.', 'd', 'l', 'l', 0
-VirtualProtect:
-        .asciz "VirtualProtect"
-kernel32BaseAddr:
-        .quad 0
-VirtualProtectAddr:
-        .quad 0
-DATA2_END:
-        .quad 0         // align for xor
 
 section         GET_KERNEL32_PROC
-                // mimic mainCRTStartup
-                sub     rsp, 0x28
-                call    dummpy_func
-                add     rsp, 0x28
-                jmp     unprotect_bootstrap_start
-#
-# UNPROTECT START
-#
-        // jmp unprotect_bootstrap_end
-unprotect_bootstrap_start:
-        // initial protect value
-                sub     rcx, r8 // they are equal (need verify in all OS)
-                inc     ecx
-                xchg    esi, ecx
-                ror     esi, 26  // 0x40
-
-                mov     rdx, IMM64(xor_key_loader)
-                lea     rcx, [rip + data2]
-                lea     r8, [rcx + data2_len]
-                xor_data2_start:
-                mov     rax, [rcx]
-                xor     rax, rdx
-                mov     [rcx], rax
-                add     rcx, 8
-                cmp     rcx, r8
-                jb      xor_data2_start
-unprotect_bootstrap_end:
-                call    GetKernel32BaseAddr
-
-                lea     rcx, [rip + virtual_protect]
-                call    GetKernel32Proc
-                mov     [rip + virtual_protect_addr], rax
-
-
-                sub     rsp, 0x28
-
-                mov     r9, rsp
-                mov     r8d, esi                 // PAGE_EXECUTE_READWRITE
-                lea     rcx, [rip + data_section]                     // VirtualProtect
-                mov     rdx, IMM64(data_section_size)   // size
-                call    [rip + virtual_protect_addr]                     // VirtualProtect
-
-                mov     r9, rsp
-                mov     r8d, esi                 // PAGE_EXECUTE_READWRITE
-
-                add     rsp, 0x28
-                lea     rax, [rip + upx_start]
-                sub     rax, rsi
-                jmp     rax
-#
-# UNPROTECT END
-#
-
-.global GetKernel32Proc
 GetKernel32Proc:
 //; File d:\tmp\upx\src\stub\src\GetKernel32Proc.c
 //; Line 61
@@ -691,7 +599,7 @@ LN25:
 	mov	QWORD PTR [rax+32], rdi
 	push	r14
 //; Line 62
-	lea	r8, [rip + kernel32_base_addr]
+	lea	r8, [rip + kernel32BaseAddr]
 	mov	r8, [r8]
 	xor	edx, edx
 	mov	rbp, rcx
@@ -798,7 +706,7 @@ LN24_GetKernel3:
 //; Line 52
 	movsx	rax, r9b
 //; Line 53
-        lea	r9, [rip + kernel_32]
+        lea	r9, [rip + kernel32]
 	mov	WORD PTR [rsp+rax*2], r10w
 	lea	rax, QWORD PTR [rsp]
 	sub	r9, rax
@@ -825,14 +733,55 @@ LN22_GetKernel3:
 LN13_GetKernel3:
 //; Line 54
 	mov	rax, QWORD PTR [rdx+48]
-	lea	r8, [rip + kernel32_base_addr]
+	lea	r8, [rip + kernel32BaseAddr]
 	mov	[r8], rax
 LN3_GetKernel3:
 //; Line 59
 	add	rsp, 536				//; 00000218H
-dummpy_func:
 	ret	0
 // GetKernel32BaseAddr ENDP
 // section         GET_KERNEL32_PROC
+
+VirtualAlloc:
+        .asciz "VirtualAlloc"
+LoadLibraryA:
+        .asciz "LoadLibraryA"
+GetProcAddress:
+        .asciz "GetProcAddress"
+ExitProcess:
+        .asciz "ExitProcess"
+VirtualProtect:
+        .asciz "VirtualProtect"
+kernel32:
+        .short 'k', 'e', 'r', 'n', 'e', 'l', '3', '2', '.', 'd', 'l', 'l', 0
+kernel32BaseAddr:
+        .quad 0
+
+END:
+.global END
+        .quad 0         // align for xor
+COMPRESSED_START:
+
+
+
+
+
+section         BOOTSTRAP
+#
+# UNPROTECT START
+#
+        // jmp unprotect_bootstrap_end
+unprotect_bootstrap_start:
+        // initial protect value
+                sub     rcx, r8 // they are equal (need verify in all OS)
+                inc     ecx
+                xchg    esi, ecx
+                ror     esi, 26  // 0x40
+                lea     rax, [rip + upx_start]
+                sub     rax, rsi
+                jmp     rax
+#
+# UNPROTECT END
+#
 
 /* vim:set ts=8 sw=8 et: */

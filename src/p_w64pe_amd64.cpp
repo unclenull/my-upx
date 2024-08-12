@@ -85,7 +85,7 @@ void PackW64PeAmd64::buildLoader(const Filter *ft) {
     // prepare loader
     initLoader(stub_amd64_win64_pe, sizeof(stub_amd64_win64_pe), 2);
     // addLoader("START");
-    addLoader("PREFIX", "START");
+    addLoader("START");
     if (ih.entry && isdll)
         addLoader("PEISDLL0");
     if (isefi)
@@ -144,7 +144,7 @@ void PackW64PeAmd64::buildLoader(const Filter *ft) {
 
     // addLoader("IDENTSTR,UPX2HEAD");
 
-    addLoader("DATA1", "DATA2");
+    addLoader("GET_KERNEL32_PROC");
 }
 
 bool PackW64PeAmd64::needForceOption() const {
@@ -194,8 +194,6 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
     //     linker->defineSymbol("vp_base", addr & ~0xfff);                      // page mask
     //     // linker->defineSymbol("VirtualProtect", ilinkerGetAddress("kernel32.dll", "VirtualProtect"));
     // }
-    linker->defineSymbol("vp_base", 0); // relocated to image base + offset 0
-    linker->defineSymbol("vp_size", osection[0].vaddr);
 
     linker->defineSymbol("start_of_relocs", crelocs);
 
@@ -227,15 +225,11 @@ void PackW64PeAmd64::defineSymbols(unsigned ncsection, unsigned upxsection, unsi
     const unsigned esi0 = s1addr + ic;
     // linker->defineSymbol("start_of_uncompressed", uncompressedSection);
     linker->defineSymbol("uncompressed_size", ph.u_len);
-    linker->defineSymbol("start_of_compressed", esi0);
 
     if (use_tls_callbacks) {
         linker->defineSymbol("tls_callbacks_ptr", tlscb_ptr - ih.imagebase);
         linker->defineSymbol("tls_module_base", 0u - rvamin);
     }
-
-    linker->defineSymbol("PREFIX", upxsection); // start address, move all sections following
-    // linker->defineSymbol("START", upxsection);
 }
 
 void PackW64PeAmd64::setOhHeaderSize(const pe_section_t *osection) {
