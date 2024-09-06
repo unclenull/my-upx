@@ -2400,6 +2400,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     else
         ih.flags |= handleStripRelocs(ih.imagebase, default_imagebase, ih.dllflags);
 
+    /* // test_bin
     if (isefi) {
         // PIC for EFI only to avoid false positive detections of Win32 images
         // without relocations fixed address is smaller
@@ -2426,6 +2427,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
             handleStub(fi, fo, pe_offset);
         }
     }
+    */ // test_bin
     unsigned overlaystart = readSections(objs, ih.imagesize, ih.filealign, ih.datasize);
     unsigned overlay = file_size_u - stripDebug(overlaystart);
     if (overlay >= file_size_u)
@@ -2774,11 +2776,12 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
     info("Image size change: %u -> %u KiB", ih.imagesize / 1024, oh.imagesize / 1024);
 
     infoHeader("[Writing compressed file]");
+    // /* // bin
     fo->write(getLoader(), codesize);
     fo->write(obuf, c_len + garbageBytes);
+    // */ // bin
 
-    /*
-    // write loader + compressed file
+    /* // test_bin
     fo->write(&oh, sizeof(oh));
     fo->write(osection, sizeof(osection[1]) * oobjs);
     fo->seek(osection[!last_section_rsrc_only ? 0 : 1].rawdataptr, SEEK_SET);
@@ -2808,7 +2811,7 @@ void PeFile::pack0(OutputFile *fo, ht &ih, ht &oh, unsigned subsystem_mask,
 
     if ((ic = fo->getBytesWritten() & fam1) != 0)
         fo->write(ibuf, oh.filealign - ic);
-    */
+    */ // test_bin
 
 
 #if 0

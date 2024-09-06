@@ -91,18 +91,56 @@ section         PEMAIN01
                 call    GetKernel32BaseAddr
                 lea     rcx, [rip + VirtualAlloc]
                 call    GetKernel32Proc
-                // the memory after this image is free, to ensure those offsets are within 4 bytes
+                mov     r15, rax
+                // Allocate after this image to ensure those offsets in the directory header are within unsigned int
+                // Usually the memory after this image is free
                 mov rcx, gs:[0x60]
                 mov rcx, [rcx+0x10] // imageBase
+                xor     rdi, rdi
+                shl     rdi, 16         // 0xff..ff0000
                 xor     rdx, rdx
                 mov     edx, [rcx+0x3c] // e_lfanew
                 mov     edx, [rcx + rdx + 0x50] // image_size
                 add     rcx, rdx
-                add     rcx, 0x10000 // AllocationGranularity
-                mov     rdx, IMM64(uncompressed_size)
+                add     rcx, 0xffff // Roundup to AllocationGranularity 0x10000
+                and     rcx, rdi
+                mov     rbx, rcx // addr
+                mov     rbp, IMM64(uncompressed_size)
+                alloc:
+                mov     rdx, rbp
                 mov     r8, 0x3000
                 mov     r9, 0x40
-                call    rax
+                call    r15
+                test    rax, rax
+                jnz     alloc_done
+                sub     rsp, 0x50 // info
+                lea     rcx, [rip + VirtualQuery]
+                call    GetKernel32Proc
+                mov     rsi, rax
+                // Otherwise find one
+                query:
+                mov     rcx, rbx
+                lea     rdx, [rsp+0x20]
+                mov	r8d, 0x30
+                call    rsi
+                cmp     dword ptr [rsp+0x40], 0x10000 // MEM_FREE
+                jnz     query_next
+                mov     rcx, [rsp+0x20]
+                add     rcx, 0xffff
+                and     rcx, rdi
+                mov     rdx, rcx
+                sub     rdx, [rsp+0x20] // rounded size
+                mov     r8, [rsp+0x38]
+                sub     r8, rdx // adjusted size
+                cmp     r8, rbp // check size
+                jge     query_done
+                query_next:
+                add     rbx, [rsp+0x38]
+                jmp     query
+                query_done:
+                add     rsp, 0x50
+                jmp     alloc
+                alloc_done:
                 mov     rdi, rax // start_of_uncompressed
                 lea     rsi, [rip + COMPRESSED_START] // start_of_compressed
 
@@ -458,7 +496,7 @@ section         PEDEPHAK
                 mov     r9, rsp
 // FIXME        push    4; pop     r8
                 mov     r8d, 4                  // PAGE_READWRITE
-                mov     rdx, 0x1000                // size
+                mov     rdx, 0x1000             // size
                 mov     rcx, rdi                // address
 
                 sub     rsp, 0x20
@@ -482,6 +520,7 @@ section         PEDEPHAK
                 add     edx, ecx
                 mov     [rax + 8*3], edx
                 mov     [rax + 8*3 + 4], IMM32(exc_size)
+                mov     qword ptr [rax + 8*14], 0 // clear thde CLR/dotnet
 
                 lea     r9, [rsp + 0x20]
                 movq    r8, [r9]                // original protection
@@ -744,6 +783,8 @@ LN3_GetKernel3:
 
 VirtualAlloc:
         .asciz "VirtualAlloc"
+VirtualQuery:
+        .asciz "VirtualQuery"
 LoadLibraryA:
         .asciz "LoadLibraryA"
 GetProcAddress:
