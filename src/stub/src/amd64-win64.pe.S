@@ -97,6 +97,7 @@ section         PEMAIN01
                 mov rcx, gs:[0x60]
                 mov rcx, [rcx+0x10] // imageBase
                 xor     rdi, rdi
+                dec     rdi
                 shl     rdi, 16         // 0xff..ff0000
                 xor     rdx, rdx
                 mov     edx, [rcx+0x3c] // e_lfanew
